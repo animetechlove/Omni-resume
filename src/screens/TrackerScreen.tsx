@@ -1,0 +1,495 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// src/screens/TrackerScreen.tsx
+// Per-show tracker screen. Organizes episodes by season → arc → canonical kind.
+// Implements §7.1b (episode grid tap), long-press platform picker, rewatch
+// (§13.3), and shelf status management (§13.2).
+// ─────────────────────────────────────────────────────────────────────────────
+
+import React, { useEffect, useState, useCallback } from 'react';
+import {
+  View, Text, ScrollView, StyleSheet, TouchableOpacity,
+  Modal, Alert, Image, Switch,
+} from 'react-native';
+import { useRoute, useNavigation, RouteProp } from '@react-navigation/native';
+import { Colors, Fonts, FontSizes, Spacing, bevelBorder } from '../theme/pixelTheme';
+import { Panel, PixelButton, WatchStatusPill, EpisodeGrid } from '../components/PixelUI';
+import type {
+  Title, Season, Arc, Episode, Progress, Platform,
+  UserSubscription, WatchHistory, CompletionEvent, ShelfStatus,
+} from '../types';
+import {
+  getTitleById, getSeasonsForTitle, getArcsForTitle,
+  getEpisodesForTitle, getUserSubscriptions, getAllPlatforms,
+  getWatchHistory, getCompletionEvents,
+} from '../db/dao/TitleDAO';
+import {
+  getProgress, recordWatchProgress, setShelfStatus, startRewatch,
+} from '../db/dao/ProgressDAO';
+
+type RouteParams = { title_id: string };
+
+// ─── EPISODE STATE HELPER ─────────────────────────────────────────────────────
+
+function episodeState(
+  ep: Episode,
+  currentAbsolute: number,
+): 'watched' | 'current' | 'upcoming' | 'ova' {
+  if (ep.canonical_kind === 'OVA' || ep.canonical_kind === 'SPECIAL') return 'ova';
+  if (ep.absolute_number < currentAbsolute) return 'watched';
+  if (ep.absolute_number === currentAbsolute) return 'current';
+  return 'upcoming';
+}
+
+// ─── PLATFORM PICKER MODAL ────────────────────────────────────────────────────
+
+interface PlatformPickerProps {
+  visible: boolean;
+  platforms: Platform[];
+  subscriptions: UserSubscription[];
+  selectedId?: string;
+  onSelect: (platformId: string) => void;
+  onCancel: () => void;
+}
+
+function PlatformPickerModal({
+  visible, platforms, subscriptions, selectedId, onSelect, onCancel,
+}: PlatformPickerProps) {
+  const subscribedIds = new Set(subscriptions.map(s => s.platform_id));
+  const available = platforms.filter(
+    p => subscribedIds.has(p.platform_id) && p.platform_id !== 'omni_companion',
+  );
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
+      <View style={pickerStyles.backdrop}>
+        <View style={pickerStyles.sheet}>
+          <Text style={pickerStyles.heading}>WHERE DID YOU WATCH?</Text>
+          {available.map(p => (
+            <TouchableOpacity
+              key={p.platform_id}
+              style={[
+                pickerStyles.row,
+                selectedId === p.platform_id && pickerStyles.rowActive,
+              ]}
+              onPress={() => onSelect(p.platform_id)}
+            >
+              <Text style={pickerStyles.cursor}>
+                {selectedId === p.platform_id ? '▶ ' : '   '}
+              </Text>
+              <Text style={pickerStyles.platformName}>{p.display_name.toUpperCase()}</Text>
+            </TouchableOpacity>
+          ))}
+          <PixelButton label="CANCEL" onPress={onCancel} color={Colors.dim} textColor={Colors.cream} style={{ marginTop: Spacing.md }} />
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const pickerStyles = StyleSheet.create({
+  backdrop: {
+    flex: 1, backgroundColor: 'rgba(11,14,26,0.9)',
+    justifyContent: 'center', padding: Spacing.lg,
+  },
+  sheet: {
+    backgroundColor: Colors.panel,
+    ...bevelBorder(3),
+    padding: Spacing.lg,
+  },
+  heading: {
+    fontFamily: Fonts.display, fontSize: FontSizes.displayXs,
+    color: Colors.gold, marginBottom: Spacing.md, letterSpacing: 1,
+  },
+  row: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: Spacing.sm,
+    borderBottomWidth: 1, borderBottomColor: Colors.borderMid,
+  },
+  rowActive: { borderBottomColor: Colors.gold },
+  cursor: { fontFamily: Fonts.display, fontSize: FontSizes.displayXs, color: Colors.gold },
+  platformName: { fontFamily: Fonts.body, fontSize: FontSizes.bodyLg, color: Colors.cream },
+});
+
+// ─── SEASON TAB ──────────────────────────────────────────────────────────────
+
+interface SeasonTabsProps {
+  seasons: Season[];
+  active: string;
+  onSelect: (id: string) => void;
+}
+
+function SeasonTabs({ seasons, active, onSelect }: SeasonTabsProps) {
+  if (seasons.length <= 1) return null;
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={tabStyles.scroll}>
+      {seasons.map(s => (
+        <TouchableOpacity
+          key={s.season_id}
+          onPress={() => onSelect(s.season_id)}
+          style={[tabStyles.tab, active === s.season_id && tabStyles.tabActive]}
+          accessibilityRole="tab"
+          accessibilityState={{ selected: active === s.season_id }}
+        >
+          <Text style={[tabStyles.label, active === s.season_id && tabStyles.labelActive]}>
+            {s.label ?? `SEASON ${s.season_number}`}
+          </Text>
+        </TouchableOpacity>
+      ))}
+    </ScrollView>
+  );
+}
+
+const tabStyles = StyleSheet.create({
+  scroll: { marginBottom: Spacing.md },
+  tab: {
+    paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm,
+    borderWidth: 2, borderColor: Colors.borderMid,
+    marginRight: Spacing.sm, backgroundColor: Colors.panelDeep,
+  },
+  tabActive: { borderColor: Colors.gold, backgroundColor: Colors.panel },
+  label: { fontFamily: Fonts.display, fontSize: FontSizes.displayXs, color: Colors.dim },
+  labelActive: { color: Colors.gold },
+});
+
+// ─── WATCH HISTORY PANEL ─────────────────────────────────────────────────────
+
+function WatchHistoryPanel({ history, completions }: {
+  history: WatchHistory[];
+  completions: CompletionEvent[];
+}) {
+  if (history.length === 0 && completions.length === 0) return null;
+
+  const formatDate = (ms: number) => new Date(ms).toLocaleDateString();
+
+  return (
+    <Panel label="WATCH HISTORY">
+      {completions.map(c => (
+        <View key={c.completion_event_id} style={histStyles.row}>
+          <Text style={histStyles.pass}>PASS {c.viewing_pass}</Text>
+          <Text style={histStyles.detail}>
+            {c.episodes_count} eps · {formatDate(c.completed_at)}
+          </Text>
+          <Text style={[histStyles.badge, { color: Colors.mint }]}>✓ DONE</Text>
+        </View>
+      ))}
+    </Panel>
+  );
+}
+
+const histStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: Spacing.xs, gap: Spacing.sm,
+    borderBottomWidth: 1, borderBottomColor: Colors.borderMid,
+  },
+  pass: { fontFamily: Fonts.display, fontSize: FontSizes.displayXs, color: Colors.gold, flex: 1 },
+  detail: { fontFamily: Fonts.body, fontSize: FontSizes.bodyMd, color: Colors.dim, flex: 2 },
+  badge: { fontFamily: Fonts.display, fontSize: FontSizes.displayXs },
+});
+
+// ─── MAIN SCREEN ─────────────────────────────────────────────────────────────
+
+export default function TrackerScreen() {
+  const route = useRoute<RouteProp<Record<string, RouteParams>, string>>();
+  const navigation = useNavigation<any>();
+  const { title_id } = route.params;
+
+  const [title, setTitle] = useState<Title | null>(null);
+  const [seasons, setSeasons] = useState<Season[]>([]);
+  const [arcs, setArcs] = useState<Arc[]>([]);
+  const [episodes, setEpisodes] = useState<Episode[]>([]);
+  const [progress, setProgress] = useState<Progress | null>(null);
+  const [platforms, setPlatforms] = useState<Platform[]>([]);
+  const [subscriptions, setSubscriptions] = useState<UserSubscription[]>([]);
+  const [history, setHistory] = useState<WatchHistory[]>([]);
+  const [completions, setCompletions] = useState<CompletionEvent[]>([]);
+
+  const [activeSeason, setActiveSeason] = useState<string>('');
+  const [pickerVisible, setPickerVisible] = useState(false);
+  const [pendingEpisode, setPendingEpisode] = useState<Episode | null>(null);
+
+  const load = useCallback(async () => {
+    const [t, p, s, a, eps, plats, subs, hist, comps] = await Promise.all([
+      getTitleById(title_id),
+      getProgress(title_id),
+      getSeasonsForTitle(title_id),
+      getArcsForTitle(title_id),
+      getEpisodesForTitle(title_id),
+      getAllPlatforms(),
+      getUserSubscriptions(true),
+      getWatchHistory(title_id),
+      getCompletionEvents(title_id),
+    ]);
+    setTitle(t);
+    setProgress(p);
+    setSeasons(s);
+    setArcs(a);
+    setEpisodes(eps);
+    setPlatforms(plats);
+    setSubscriptions(subs);
+    setHistory(hist);
+    setCompletions(comps);
+    if (s.length > 0 && !activeSeason) setActiveSeason(s[0].season_id);
+  }, [title_id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const currentAbsolute = episodes.find(
+    e => e.episode_id === progress?.watch_episode_id,
+  )?.absolute_number ?? 0;
+
+  // Episodes for the active season
+  const seasonEpisodes = episodes.filter(e =>
+    !activeSeason || e.season_id === activeSeason,
+  );
+
+  // Group episodes by arc within the active season
+  type ArcGroup = { arc: Arc | null; episodes: Episode[] };
+  const arcGroups: ArcGroup[] = [];
+  const arcMap = new Map(arcs.map(a => [a.arc_id, a]));
+
+  const grouped = new Map<string | null, Episode[]>();
+  for (const ep of seasonEpisodes) {
+    const key = ep.arc_id ?? null;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key)!.push(ep);
+  }
+
+  // Ordered: arcs first (by arc_index), then ungrouped
+  const sortedArcs = arcs
+    .filter(a => grouped.has(a.arc_id))
+    .sort((a, b) => a.arc_index - b.arc_index);
+
+  for (const arc of sortedArcs) {
+    arcGroups.push({ arc, episodes: grouped.get(arc.arc_id) ?? [] });
+  }
+  if (grouped.has(null)) {
+    arcGroups.push({ arc: null, episodes: grouped.get(null) ?? [] });
+  }
+
+  // ── Episode tile tap: single tap marks through that episode ──
+  const handleTileTap = async (episodeId: string, absoluteNumber: number) => {
+    if (!progress) return;
+    if (absoluteNumber <= currentAbsolute) {
+      Alert.alert('Already watched', `Marked through Episode ${currentAbsolute}.`);
+      return;
+    }
+    const total = title?.total_episodes ?? 0;
+    const newStatus = absoluteNumber === total ? 'COMPLETED' : 'PAUSED';
+    await recordWatchProgress(
+      title_id, episodeId, 0,
+      progress.last_platform_id ?? '',
+      newStatus, 'MANUAL',
+    );
+    if (newStatus === 'COMPLETED') {
+      Alert.alert('🎉 QUEST COMPLETE', `${title?.english_title ?? title?.romaji_title ?? ''} finished!`);
+    }
+    await load();
+  };
+
+  // ── Long press: open platform picker first, then mark ──
+  const handleTileLongPress = (ep: Episode) => {
+    setPendingEpisode(ep);
+    setPickerVisible(true);
+  };
+
+  const handlePlatformSelected = async (platformId: string) => {
+    if (!pendingEpisode || !progress) return;
+    setPickerVisible(false);
+    const total = title?.total_episodes ?? 0;
+    const newStatus = pendingEpisode.absolute_number === total ? 'COMPLETED' : 'PAUSED';
+    await recordWatchProgress(
+      title_id, pendingEpisode.episode_id, 0,
+      platformId, newStatus, 'MANUAL',
+    );
+    setPendingEpisode(null);
+    await load();
+  };
+
+  // ── Shelf / Rewatch actions ──
+  const handleSetShelf = async (status: ShelfStatus) => {
+    await setShelfStatus(title_id, status);
+    Alert.alert(
+      status === 'ARCHIVED' ? 'Archived' : status === 'SNOOZED' ? 'Snoozed' : 'Restored',
+      status === 'ARCHIVED'
+        ? 'Moved to archive. Find it in Library → Archived.'
+        : status === 'SNOOZED'
+        ? 'Snoozed. We won\'t nudge you about this for 30 days.'
+        : 'Back in your active library.',
+    );
+    await load();
+  };
+
+  const handleRewatch = async () => {
+    Alert.alert(
+      '▶ WATCH AGAIN?',
+      'This will archive the current completed run and reset to Episode 1. Your arc unlocks are kept.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Start Rewatch',
+          onPress: async () => {
+            await startRewatch(title_id);
+            await load();
+          },
+        },
+      ],
+    );
+  };
+
+  if (!title) return null;
+
+  return (
+    <ScrollView style={styles.root} contentContainerStyle={styles.container}>
+      {/* Header */}
+      <Panel>
+        <View style={styles.header}>
+          {title.cover_image_url && (
+            <Image source={{ uri: title.cover_image_url }} style={styles.cover} />
+          )}
+          <View style={styles.headerText}>
+            <Text style={styles.titleName} numberOfLines={2}>
+              {title.english_title ?? title.romaji_title}
+            </Text>
+            <Text style={styles.titleMeta}>
+              {title.media_format} · {title.total_episodes ?? '?'} EPS
+            </Text>
+            {progress && (
+              <WatchStatusPill status={progress.watch_status} />
+            )}
+          </View>
+        </View>
+
+        {/* Shelf actions */}
+        {progress && progress.watch_status !== 'COMPLETED' && (
+          <View style={styles.shelfRow}>
+            {progress.shelf_status !== 'SNOOZED' && (
+              <TouchableOpacity style={styles.shelfBtn} onPress={() => handleSetShelf('SNOOZED')}>
+                <Text style={styles.shelfBtnText}>⏸ SNOOZE</Text>
+              </TouchableOpacity>
+            )}
+            {progress.shelf_status !== 'ARCHIVED' && (
+              <TouchableOpacity style={styles.shelfBtn} onPress={() => handleSetShelf('ARCHIVED')}>
+                <Text style={styles.shelfBtnText}>📦 ARCHIVE</Text>
+              </TouchableOpacity>
+            )}
+            {progress.shelf_status !== 'ACTIVE' && (
+              <TouchableOpacity style={[styles.shelfBtn, { borderColor: Colors.mint }]} onPress={() => handleSetShelf('ACTIVE')}>
+                <Text style={[styles.shelfBtnText, { color: Colors.mint }]}>↩ RESTORE</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+
+        {/* Rewatch */}
+        {progress?.watch_status === 'COMPLETED' && (
+          <PixelButton
+            label="▶ WATCH AGAIN"
+            onPress={handleRewatch}
+            color={Colors.violet}
+            style={{ marginTop: Spacing.sm }}
+          />
+        )}
+
+        {/* Franchise map link */}
+        <TouchableOpacity
+          style={styles.franchiseLink}
+          onPress={() => navigation.navigate('FranchiseMap', { title_id })}
+        >
+          <Text style={styles.franchiseLinkText}>◈ VIEW FRANCHISE MAP →</Text>
+        </TouchableOpacity>
+      </Panel>
+
+      {/* Season tabs */}
+      <SeasonTabs
+        seasons={seasons}
+        active={activeSeason}
+        onSelect={setActiveSeason}
+      />
+
+      {/* Arc / episode groups */}
+      {arcGroups.map((group, i) => (
+        <Panel
+          key={group.arc?.arc_id ?? `ungrouped-${i}`}
+          label={group.arc ? `ARC ${group.arc.arc_index + 1}: ${group.arc.name.toUpperCase()}` : 'EPISODES'}
+        >
+          {/* Arc lock indicator */}
+          {group.arc && progress && group.arc.arc_index >= progress.unlocked_arc_index && (
+            <View style={styles.lockBadge}>
+              <Text style={styles.lockText}>
+                🔒 PLAY CONTENT LOCKED — WATCH THROUGH THIS ARC TO UNLOCK
+              </Text>
+            </View>
+          )}
+
+          <EpisodeGrid
+            episodes={group.episodes.map(ep => ({
+              ...ep,
+              status: episodeState(ep, currentAbsolute),
+            }))}
+            onTileTap={handleTileTap}
+            onTileLongPress={(episodeId, absoluteNumber) => {
+              const ep = group.episodes.find(e => e.episode_id === episodeId);
+              if (ep) handleTileLongPress(ep);
+            }}
+          />
+
+          {/* Legend row */}
+          <View style={styles.legend}>
+            <Text style={styles.legendText}>TAP = MARK WATCHED</Text>
+            <Text style={styles.legendText}>LONG PRESS = SET PLATFORM</Text>
+          </View>
+        </Panel>
+      ))}
+
+      {/* Watch history */}
+      <WatchHistoryPanel history={history} completions={completions} />
+
+      {/* Platform picker modal */}
+      <PlatformPickerModal
+        visible={pickerVisible}
+        platforms={platforms}
+        subscriptions={subscriptions}
+        selectedId={progress?.last_platform_id}
+        onSelect={handlePlatformSelected}
+        onCancel={() => { setPickerVisible(false); setPendingEpisode(null); }}
+      />
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: Colors.void },
+  container: { padding: Spacing.lg, paddingBottom: Spacing.xxl },
+  header: { flexDirection: 'row', gap: Spacing.md, alignItems: 'flex-start' },
+  cover: {
+    width: 72, height: 100,
+    borderWidth: 2, borderColor: Colors.borderMid,
+  },
+  headerText: { flex: 1 },
+  titleName: {
+    fontFamily: Fonts.display, fontSize: FontSizes.displaySm,
+    color: Colors.cream, lineHeight: 22, marginBottom: Spacing.xs,
+  },
+  titleMeta: { fontFamily: Fonts.body, fontSize: FontSizes.bodyMd, color: Colors.dim },
+  shelfRow: { flexDirection: 'row', gap: Spacing.sm, marginTop: Spacing.sm },
+  shelfBtn: {
+    flex: 1, paddingVertical: Spacing.sm,
+    borderWidth: 2, borderColor: Colors.borderMid,
+    alignItems: 'center',
+  },
+  shelfBtnText: { fontFamily: Fonts.display, fontSize: FontSizes.displayXs, color: Colors.dim },
+  franchiseLink: { marginTop: Spacing.md, alignSelf: 'flex-end' },
+  franchiseLinkText: { fontFamily: Fonts.body, fontSize: FontSizes.bodyMd, color: Colors.blue },
+  lockBadge: {
+    backgroundColor: Colors.panelDeep, padding: Spacing.sm,
+    borderWidth: 1, borderColor: Colors.borderMid, marginBottom: Spacing.sm,
+  },
+  lockText: { fontFamily: Fonts.body, fontSize: FontSizes.bodySm, color: Colors.dim },
+  legend: {
+    flexDirection: 'row', justifyContent: 'space-between',
+    marginTop: Spacing.sm,
+    borderTopWidth: 1, borderTopColor: Colors.borderMid, paddingTop: Spacing.xs,
+  },
+  legendText: { fontFamily: Fonts.body, fontSize: FontSizes.bodySm, color: Colors.dim },
+});

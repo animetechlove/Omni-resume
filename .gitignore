@@ -1,0 +1,43 @@
+# OSX
+.DS_Store
+
+# XDE
+.expo/
+
+# VSCode
+.vscode/
+
+# Node
+node_modules/
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# Android
+*.keystore
+!debug.keystore
+android/.gradle
+android/app/build/
+android/build/
+android/local.properties
+android/captures/
+
+# iOS
+ios/build/
+ios/Pods/
+ios/.xcode.env.local
+
+# Build
+*.orig.*
+web-build/
+
+# EAS
+.easignore
+
+# Environment — never push your secrets
+.env
+.env.local
+.env.production
+
+# Metro
+.metro-health-check*

@@ -1,0 +1,45 @@
+{
+  "name": "OmniResume",
+  "displayName": "Omni-Resume",
+  "expo": {
+    "name": "Omni-Resume",
+    "slug": "omni-resume",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "backgroundColor": "#0B0E1A",
+    "android": {
+      "package": "com.omniresume.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#0B0E1A"
+      },
+      "permissions": [
+        "CAMERA",
+        "VIBRATE",
+        "RECEIVE_BOOT_COMPLETED",
+        "SCHEDULE_EXACT_ALARM"
+      ]
+    },
+    "ios": {
+      "bundleIdentifier": "com.omniresume.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Scan your platform QR tags to quickly log where you watched.",
+        "UIBackgroundModes": ["fetch", "remote-notification"]
+      }
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "compileSdkVersion": 34,
+            "targetSdkVersion": 34,
+            "minSdkVersion": 24
+          },
+          "ios": {
+            "deploymentTarget": "14.0"
+          }
+        }
+      ]
+    ]
+  }
+}
