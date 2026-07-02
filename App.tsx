@@ -9,7 +9,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { Colors, Fonts } from './src/theme/pixelTheme';
-import { getDatabase } from './src/db/database';
+import { getDatabase, runMigrations } from './src/db/database';
 import { NotificationService } from './src/services/NotificationService';
 import { handleInternalDeepLink } from './src/services/QRService';
 
@@ -73,7 +73,8 @@ export default function App() {
   const navigationRef = useRef<NavigationContainerRef<RootStackParamList>>(null);
 
   useEffect(() => {
-    getDatabase().catch(e => console.error('[App] DB init failed:', e));
+    // Bootstrap DB — runs migrations and sets up all tables
+    runMigrations().catch(e => console.error('[App] DB migration failed:', e));
     NotificationService.init().catch(e => console.error('[App] Notif init failed:', e));
 
     if (navigationRef.current) {

@@ -4,6 +4,7 @@
   "expo": {
     "name": "Omni-Resume",
     "slug": "omni-resume",
+    "owner": "inkstone-collective",
     "version": "1.0.0",
     "orientation": "portrait",
     "backgroundColor": "#0B0E1A",
@@ -23,23 +24,19 @@
       "bundleIdentifier": "com.omniresume.app",
       "infoPlist": {
         "NSCameraUsageDescription": "Scan your platform QR tags to quickly log where you watched.",
-        "UIBackgroundModes": ["fetch", "remote-notification"]
+        "UIBackgroundModes": [
+          "fetch",
+          "remote-notification"
+        ]
+      }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "e6b59b25-52b7-4be8-8443-c43500839b83"
       }
     },
     "plugins": [
-      [
-        "expo-build-properties",
-        {
-          "android": {
-            "compileSdkVersion": 34,
-            "targetSdkVersion": 34,
-            "minSdkVersion": 24
-          },
-          "ios": {
-            "deploymentTarget": "14.0"
-          }
-        }
-      ]
+      "expo-sqlite"
     ]
   }
 }

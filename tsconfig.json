@@ -1,11 +1,26 @@
 {
-  "extends": "@react-native/typescript-config/tsconfig.json",
   "compilerOptions": {
     "strict": true,
-    "baseUrl": ".",
-    "paths": {
-      "@env": ["./env.d.ts"]
-    }
+    "ignoreDeprecations": "6.0",
+    "target": "esnext",
+    "module": "commonjs",
+    "lib": [
+      "esnext"
+    ],
+    "jsx": "react-native",
+    "noEmit": true,
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowJs": true,
+    "baseUrl": "."
   },
-  "include": ["src", "App.tsx", "index.js"]
+  "include": [
+    "src",
+    "App.tsx",
+    "index.js"
+  ],
+  "extends": "expo/tsconfig.base"
 }
