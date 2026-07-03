@@ -1,10 +1,3 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// src/screens/SearchScreen.tsx
-// Search AniList for anime and add titles to the local tracker.
-// Uses the searchTitles() function added to AniListClient (unauthenticated,
-// no login required for basic search).
-// ─────────────────────────────────────────────────────────────────────────────
-
 import React, { useState, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, TextInput, FlatList,
@@ -12,68 +5,65 @@ import {
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Colors, Fonts, FontSizes, Spacing } from '../theme/pixelTheme';
-import { PixelButton, Panel } from '../components/PixelUI';
+import { Panel, PixelButton } from '../components/PixelUI';
 import type { AniListSearchResult } from '../services/AniListClient';
 import { searchTitles } from '../services/AniListClient';
-import { upsertTitle, upsertSeason, upsertEpisode, upsertTitleTags } from '../db/dao/TitleDAO';
+import { upsertTitle, upsertSeason, upsertEpisode, upsertTitleTags, getTitleByAnilistId } from '../db/dao/TitleDAO';
 import { getOrCreateProgress } from '../db/dao/ProgressDAO';
-import { getProgress } from '../db/dao/ProgressDAO';
+import { buildFranchiseForTitle } from '../services/FranchiseService';
 import { v4 as uuidv4 } from 'uuid';
 
-// ─── ADD TITLE TO LOCAL DB ────────────────────────────────────────────────────
-
 async function addTitleToLibrary(result: AniListSearchResult): Promise<string> {
-  const titleId = uuidv4();
   const now = Date.now();
-
-  // Upsert the title row
+  if (result.anilist_id) {
+    const existing = await getTitleByAnilistId(result.anilist_id);
+    if (existing) return existing.title_id;
+  }
+  const titleId = uuidv4();
   await upsertTitle({
-    title_id:        titleId,
-    anilist_id:      result.anilist_id,
-    mal_id:          result.mal_id,
-    romaji_title:    result.romaji_title,
-    english_title:   result.english_title,
-    media_format:    result.media_format as any,
-    total_episodes:  result.total_episodes,
+    title_id: titleId,
+    anilist_id: result.anilist_id,
+    mal_id: result.mal_id,
+    romaji_title: result.romaji_title,
+    english_title: result.english_title,
+    media_format: result.media_format as any,
+    total_episodes: result.total_episodes,
     cover_image_url: result.cover_image_url,
-    updated_at:      now,
+    updated_at: now,
   });
-
-  // Create default season 1
   const seasonId = uuidv4();
-  await upsertSeason({
-    season_id:     seasonId,
-    title_id:      titleId,
-    season_number: 1,
-    label:         undefined,
-  });
-
-  // Stub episode rows if we know the total count
+  await upsertSeason({ season_id: seasonId, title_id: titleId, season_number: 1 });
   if (result.total_episodes && result.total_episodes > 0) {
     for (let n = 1; n <= result.total_episodes; n++) {
       await upsertEpisode({
-        episode_id:      uuidv4(),
-        title_id:        titleId,
-        season_id:       seasonId,
-        absolute_number: n,
-        season_episode:  n,
-        canonical_kind:  'MAIN',
+        episode_id: uuidv4(), title_id: titleId, season_id: seasonId,
+        absolute_number: n, season_episode: n, canonical_kind: 'MAIN',
       });
     }
   }
-
-  // Store genre/mood tags (§13.6)
-  if (result.tags.length > 0) {
-    await upsertTitleTags(titleId, result.tags);
-  }
-
-  // Create progress row
+  if (result.tags.length > 0) await upsertTitleTags(titleId, result.tags);
   await getOrCreateProgress(titleId);
-
   return titleId;
 }
 
-// ─── SEARCH RESULT CARD ───────────────────────────────────────────────────────
+interface SlideToggleProps {
+  isOn: boolean;
+  onPress: () => void;
+}
+
+function SlideToggle({ isOn, onPress }: SlideToggleProps) {
+  return (
+    <TouchableOpacity
+      style={[s.toggleBtn, { backgroundColor: isOn ? Colors.mint : Colors.gold }]}
+      onPress={onPress}
+      activeOpacity={0.7}
+    >
+      <View style={[s.toggleBar, isOn ? s.toggleBarOn : s.toggleBarOff]} />
+      <Text style={s.toggleLabel}>{isOn ? "OPEN" : "ADD"}{"
+"}{isOn ? ">" : "+"}</Text>
+    </TouchableOpacity>
+  );
+}
 
 interface ResultCardProps {
   result: AniListSearchResult;
@@ -83,69 +73,44 @@ interface ResultCardProps {
 }
 
 function ResultCard({ result, alreadyAdded, onAdd, onOpen }: ResultCardProps) {
-  const epLabel = result.total_episodes
-    ? `${result.total_episodes} EP`
-    : 'TBA';
-
+  const epLabel = result.total_episodes ? result.total_episodes + " EP" : "TBA";
   return (
-    <View style={styles.resultCard}>
-      {/* Cover */}
-      <View style={styles.resultCover}>
+    <View style={s.resultCard}>
+      <View style={s.resultCover}>
         {result.cover_image_url ? (
-          <Image source={{ uri: result.cover_image_url }} style={styles.resultImg} />
+          <Image source={{ uri: result.cover_image_url }} style={s.resultImg} />
         ) : (
-          <View style={[styles.resultImg, { backgroundColor: Colors.panelDeep, alignItems: 'center', justifyContent: 'center' }]}>
+          <View style={[s.resultImg, { backgroundColor: Colors.panelDeep, alignItems: "center", justifyContent: "center" }]}>
             <Text style={{ fontFamily: Fonts.display, fontSize: FontSizes.displayXs, color: Colors.borderMid }}>?</Text>
           </View>
         )}
       </View>
-
-      {/* Info */}
-      <View style={styles.resultInfo}>
-        <Text style={styles.resultTitle} numberOfLines={2}>
+      <View style={s.resultInfo}>
+        <Text style={s.resultTitle} numberOfLines={2}>
           {result.english_title ?? result.romaji_title}
         </Text>
         {result.english_title && result.romaji_title !== result.english_title && (
-          <Text style={styles.resultSubTitle} numberOfLines={1}>{result.romaji_title}</Text>
+          <Text style={s.resultSubTitle} numberOfLines={1}>{result.romaji_title}</Text>
         )}
-        <View style={styles.resultMeta}>
-          {result.media_format && (
-            <Text style={styles.resultMetaText}>{result.media_format}</Text>
-          )}
-          <Text style={styles.resultMetaText}> · {epLabel}</Text>
-          {result.status && (
-            <Text style={styles.resultMetaText}> · {result.status.replace('_', ' ')}</Text>
-          )}
+        <View style={s.resultMeta}>
+          {result.media_format && <Text style={s.resultMetaText}>{result.media_format}</Text>}
+          <Text style={s.resultMetaText}> · {epLabel}</Text>
+          {result.status && <Text style={s.resultMetaText}> · {result.status.replace("_", " ")}</Text>}
         </View>
         {result.next_episode && result.next_airing_at && (
-          <Text style={styles.airingText}>
-            EP {result.next_episode} →{' '}
-            {new Date(result.next_airing_at).toLocaleDateString()}
+          <Text style={s.airingText}>
+            EP {result.next_episode} → {new Date(result.next_airing_at).toLocaleDateString()}
           </Text>
         )}
       </View>
-
-      {/* Action */}
-      <View style={styles.resultAction}>
-        {alreadyAdded ? (
-          <TouchableOpacity style={styles.openBtn} onPress={onOpen}>
-            <Text style={styles.openBtnText}>OPEN{'\n'}▶</Text>
-          </TouchableOpacity>
-        ) : (
-          <TouchableOpacity style={styles.addBtn} onPress={onAdd}>
-            <Text style={styles.addBtnText}>ADD{'\n'}+</Text>
-          </TouchableOpacity>
-        )}
-      </View>
+      <SlideToggle isOn={alreadyAdded} onPress={alreadyAdded ? onOpen : onAdd} />
     </View>
   );
 }
 
-// ─── MAIN SCREEN ─────────────────────────────────────────────────────────────
-
 export default function SearchScreen() {
   const navigation = useNavigation<any>();
-  const [searchText, setSearchText] = useState('');
+  const [searchText, setSearchText] = useState("");
   const [results, setResults] = useState<AniListSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [addedIds, setAddedIds] = useState<Set<number>>(new Set());
@@ -153,17 +118,14 @@ export default function SearchScreen() {
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
   const doSearch = useCallback(async (text: string) => {
-    if (text.trim().length < 2) {
-      setResults([]);
-      return;
-    }
+    if (text.trim().length < 2) { setResults([]); return; }
     setSearching(true);
     setError(null);
     try {
       const r = await searchTitles(text.trim());
       setResults(r);
     } catch (e: any) {
-      setError('Could not reach AniList. Check your connection.');
+      setError("Could not reach AniList. Check your connection.");
       setResults([]);
     } finally {
       setSearching(false);
@@ -180,36 +142,38 @@ export default function SearchScreen() {
     try {
       const titleId = await addTitleToLibrary(result);
       setAddedIds(prev => new Set(prev).add(result.anilist_id));
+      if (result.anilist_id) {
+        try {
+          await buildFranchiseForTitle(titleId, result.anilist_id);
+        } catch (fe) {
+          console.log("[SearchScreen] Franchise build failed:", fe);
+        }
+      }
       Alert.alert(
-        '✓ Added',
-        `${result.english_title ?? result.romaji_title} added to your library.`,
+        "Added",
+        (result.english_title ?? result.romaji_title) + " added to your library.",
         [
-          { text: 'Open Tracker', onPress: () => navigation.navigate('Tracker', { title_id: titleId }) },
-          { text: 'Keep Searching', style: 'cancel' },
+          { text: "Open Tracker", onPress: () => navigation.navigate("Tracker", { title_id: titleId }) },
+          { text: "Keep Searching", style: "cancel" },
         ],
       );
     } catch (e: any) {
-      Alert.alert('Error', 'Could not add title: ' + (e.message ?? 'unknown error'));
+      Alert.alert("Error", "Could not add title: " + (e.message ?? "unknown error"));
     }
   };
 
   const handleOpen = async (result: AniListSearchResult) => {
-    // Find the local title_id for this anilist_id
-    const { getTitleByAnilistId } = await import('../db/dao/TitleDAO');
     const t = await getTitleByAnilistId(result.anilist_id);
-    if (t) {
-      navigation.navigate('Tracker', { title_id: t.title_id });
-    }
+    if (t) navigation.navigate("Tracker", { title_id: t.title_id });
   };
 
   return (
-    <View style={styles.root}>
-      {/* Search bar */}
-      <View style={styles.searchBar}>
-        <View style={styles.searchInput}>
-          <Text style={styles.searchIcon}>🔍</Text>
+    <View style={s.root}>
+      <View style={s.searchBar}>
+        <View style={s.searchInput}>
+          <Text style={s.searchIcon}>🔍</Text>
           <TextInput
-            style={styles.input}
+            style={s.input}
             placeholder="Search anime..."
             placeholderTextColor={Colors.dim}
             value={searchText}
@@ -219,47 +183,30 @@ export default function SearchScreen() {
             onSubmitEditing={() => doSearch(searchText)}
           />
           {searchText.length > 0 && (
-            <TouchableOpacity onPress={() => { setSearchText(''); setResults([]); }}>
-              <Text style={styles.clearIcon}>✕</Text>
+            <TouchableOpacity onPress={() => { setSearchText(""); setResults([]); }}>
+              <Text style={s.clearIcon}>x</Text>
             </TouchableOpacity>
           )}
         </View>
       </View>
-
-      {/* Powered by AniList note */}
-      <Text style={styles.poweredBy}>Powered by AniList API</Text>
-
-      {/* States */}
+      <Text style={s.poweredBy}>Powered by AniList API</Text>
       {searching && (
-        <View style={styles.center}>
+        <View style={s.center}>
           <ActivityIndicator color={Colors.gold} />
-          <Text style={styles.searchingText}>SEARCHING...</Text>
+          <Text style={s.searchingText}>SEARCHING...</Text>
         </View>
       )}
-
-      {error && (
-        <Panel style={{ margin: Spacing.lg }}>
-          <Text style={styles.errorText}>{error}</Text>
-        </Panel>
-      )}
-
+      {error && <Panel style={{ margin: Spacing.lg }}><Text style={s.errorText}>{error}</Text></Panel>}
       {!searching && !error && results.length === 0 && searchText.length > 1 && (
-        <View style={styles.center}>
-          <Text style={styles.noResults}>No results for "{searchText}"</Text>
-        </View>
+        <View style={s.center}><Text style={s.noResults}>No results for "{searchText}"</Text></View>
       )}
-
       {!searching && results.length === 0 && searchText.length < 2 && (
-        <View style={styles.center}>
-          <Text style={styles.hint}>▸ TYPE AT LEAST 2 CHARACTERS TO SEARCH</Text>
-        </View>
+        <View style={s.center}><Text style={s.hint}>TYPE AT LEAST 2 CHARACTERS TO SEARCH</Text></View>
       )}
-
-      {/* Results list */}
       <FlatList
         data={results}
         keyExtractor={r => String(r.anilist_id)}
-        contentContainerStyle={styles.list}
+        contentContainerStyle={s.list}
         keyboardShouldPersistTaps="handled"
         renderItem={({ item }) => (
           <ResultCard
@@ -274,14 +221,11 @@ export default function SearchScreen() {
   );
 }
 
-// ─── STYLES ──────────────────────────────────────────────────────────────────
-
-const styles = StyleSheet.create({
+const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: Colors.void },
-
   searchBar: { padding: Spacing.md, backgroundColor: Colors.panel, borderBottomWidth: 2, borderBottomColor: Colors.borderMid },
   searchInput: {
-    flexDirection: 'row', alignItems: 'center',
+    flexDirection: "row", alignItems: "center",
     backgroundColor: Colors.panelDeep,
     borderWidth: 2, borderTopColor: Colors.borderMid, borderLeftColor: Colors.borderMid,
     borderBottomColor: Colors.borderLo, borderRightColor: Colors.borderLo,
@@ -290,39 +234,29 @@ const styles = StyleSheet.create({
   searchIcon: { fontSize: 18, marginRight: Spacing.xs },
   input: { flex: 1, fontFamily: Fonts.body, fontSize: FontSizes.bodyLg, color: Colors.cream, paddingVertical: Spacing.sm },
   clearIcon: { fontFamily: Fonts.body, fontSize: FontSizes.bodyLg, color: Colors.dim, padding: Spacing.xs },
-
-  poweredBy: { fontFamily: Fonts.body, fontSize: FontSizes.bodySm, color: Colors.borderMid, textAlign: 'center', paddingVertical: 4, backgroundColor: Colors.panelDeep },
-
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: Spacing.xxl },
+  poweredBy: { fontFamily: Fonts.body, fontSize: FontSizes.bodySm, color: Colors.borderMid, textAlign: "center", paddingVertical: 4, backgroundColor: Colors.panelDeep },
+  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: Spacing.xxl },
   searchingText: { fontFamily: Fonts.display, fontSize: FontSizes.displayXs, color: Colors.gold, marginTop: Spacing.md },
-  noResults: { fontFamily: Fonts.body, fontSize: FontSizes.bodyLg, color: Colors.dim, textAlign: 'center' },
-  hint: { fontFamily: Fonts.display, fontSize: FontSizes.displayXs, color: Colors.borderMid, textAlign: 'center', letterSpacing: 1 },
+  noResults: { fontFamily: Fonts.body, fontSize: FontSizes.bodyLg, color: Colors.dim, textAlign: "center" },
+  hint: { fontFamily: Fonts.display, fontSize: FontSizes.displayXs, color: Colors.borderMid, textAlign: "center", letterSpacing: 1 },
   errorText: { fontFamily: Fonts.body, fontSize: FontSizes.bodyMd, color: Colors.coral },
-
   list: { padding: Spacing.md, paddingBottom: Spacing.xxl },
-
-  resultCard: {
-    flexDirection: 'row', alignItems: 'center', gap: Spacing.sm,
-    paddingVertical: Spacing.sm,
-    borderBottomWidth: 1, borderBottomColor: Colors.borderMid,
-  },
+  resultCard: { flexDirection: "row", alignItems: "center", gap: Spacing.sm, paddingVertical: Spacing.sm, borderBottomWidth: 1, borderBottomColor: Colors.borderMid },
   resultCover: {},
   resultImg: { width: 48, height: 68, borderWidth: 1, borderColor: Colors.borderMid },
   resultInfo: { flex: 1 },
   resultTitle: { fontFamily: Fonts.body, fontSize: FontSizes.bodyLg, color: Colors.cream, lineHeight: 22, marginBottom: 2 },
   resultSubTitle: { fontFamily: Fonts.body, fontSize: FontSizes.bodySm, color: Colors.dim, marginBottom: 2 },
-  resultMeta: { flexDirection: 'row', flexWrap: 'wrap' },
+  resultMeta: { flexDirection: "row", flexWrap: "wrap" },
   resultMetaText: { fontFamily: Fonts.body, fontSize: FontSizes.bodySm, color: Colors.dim },
   airingText: { fontFamily: Fonts.display, fontSize: 8, color: Colors.mint, marginTop: 3 },
-  resultAction: {},
-  addBtn: {
-    backgroundColor: Colors.gold, borderWidth: 2, borderColor: Colors.borderLo,
-    paddingVertical: 6, paddingHorizontal: Spacing.sm, alignItems: 'center', minWidth: 44,
+  toggleBtn: {
+    width: 56, paddingVertical: 8, paddingHorizontal: 6,
+    borderWidth: 2, borderColor: Colors.borderLo,
+    alignItems: "center", justifyContent: "center", gap: 4,
   },
-  addBtnText: { fontFamily: Fonts.display, fontSize: 9, color: Colors.void, textAlign: 'center', lineHeight: 14 },
-  openBtn: {
-    backgroundColor: Colors.mint, borderWidth: 2, borderColor: Colors.borderLo,
-    paddingVertical: 6, paddingHorizontal: Spacing.sm, alignItems: 'center', minWidth: 44,
-  },
-  openBtnText: { fontFamily: Fonts.display, fontSize: 9, color: Colors.void, textAlign: 'center', lineHeight: 14 },
+  toggleBar: { width: 32, height: 4, borderRadius: 2, backgroundColor: Colors.void },
+  toggleBarOn: { alignSelf: "flex-end" },
+  toggleBarOff: { alignSelf: "flex-start" },
+  toggleLabel: { fontFamily: Fonts.display, fontSize: 9, color: Colors.void, textAlign: "center", lineHeight: 14 },
 });

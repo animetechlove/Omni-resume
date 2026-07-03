@@ -54,9 +54,8 @@ interface PlatformPickerProps {
 function PlatformPickerModal({
   visible, platforms, subscriptions, selectedId, onSelect, onCancel,
 }: PlatformPickerProps) {
-  const subscribedIds = new Set(subscriptions.map(s => s.platform_id));
   const available = platforms.filter(
-    p => subscribedIds.has(p.platform_id) && p.platform_id !== 'omni_companion',
+    p => p.platform_id !== 'omni_companion',
   );
 
   return (

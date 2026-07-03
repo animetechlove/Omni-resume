@@ -170,6 +170,7 @@ export default function FranchiseMapScreen() {
   const load = useCallback(async () => {
     setLoading(true);
     const result = await getFranchiseForTitle(title_id);
+    console.log('[FranchiseMap] result:', JSON.stringify(result?.franchise?.name), 'entries:', result?.entries?.length);
     if (!result) { setLoading(false); return; }
 
     setFranchise(result.franchise);

@@ -15,6 +15,7 @@ import { Colors, Fonts, FontSizes, Spacing, bevelBorder, StatusColors } from '..
 import { Panel, PixelButton, WatchStatusPill } from '../components/PixelUI';
 import type { Progress, Title, ShelfStatus, WatchStatus } from '../types';
 import { getAllTags, getTitlesByTag } from '../db/dao/TitleDAO';
+import { execute } from '../db/database';
 import { getAllActiveProgress, getDecayingTitles } from '../db/dao/ProgressDAO';
 import { query } from '../db/database';
 
@@ -110,49 +111,46 @@ async function loadLibraryEntries(
 interface TitleCardProps {
   entry: LibraryEntry;
   onPress: () => void;
+  onRemove: () => void;
 }
 
-function TitleCard({ entry, onPress }: TitleCardProps) {
+function TitleCard({ entry, onPress, onRemove }: TitleCardProps) {
   const { title, progress, is_decaying } = entry;
   const statusCfg = StatusColors[progress.watch_status] ?? StatusColors.DISCOVERED;
+  const [removing, setRemoving] = React.useState(false);
 
   const daysSince = Math.floor(
     (Date.now() - progress.updated_at) / (1000 * 60 * 60 * 24),
   );
 
+  const handleRemovePress = () => {
+    setRemoving(true);
+    onRemove();
+  };
+
   return (
-    <TouchableOpacity
-      style={[styles.card, is_decaying && styles.cardDecaying]}
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityLabel={title.english_title ?? title.romaji_title}
-    >
-      {/* Cover */}
-      <View style={styles.cardCover}>
+    <View style={[styles.card, is_decaying && styles.cardDecaying]}>
+      {/* Cover — tappable to open tracker */}
+      <TouchableOpacity onPress={onPress} style={styles.cardCover}>
         {title.cover_image_url ? (
-          <Image
-            source={{ uri: title.cover_image_url }}
-            style={styles.cardCoverImg}
-          />
+          <Image source={{ uri: title.cover_image_url }} style={styles.cardCoverImg} />
         ) : (
           <View style={[styles.cardCoverImg, { backgroundColor: Colors.panelDeep }]}>
             <Text style={styles.cardCoverPlaceholder}>?</Text>
           </View>
         )}
-        {/* Viewing pass badge */}
         {progress.viewing_pass > 1 && (
           <View style={styles.passBadge}>
             <Text style={styles.passBadgeText}>×{progress.viewing_pass}</Text>
           </View>
         )}
-      </View>
+      </TouchableOpacity>
 
-      {/* Info */}
-      <View style={styles.cardInfo}>
+      {/* Info — tappable to open tracker */}
+      <TouchableOpacity style={styles.cardInfo} onPress={onPress}>
         <Text style={styles.cardTitle} numberOfLines={2}>
           {title.english_title ?? title.romaji_title}
         </Text>
-
         <View style={styles.cardMeta}>
           {title.media_format && (
             <Text style={styles.cardFormat}>{title.media_format}</Text>
@@ -161,22 +159,33 @@ function TitleCard({ entry, onPress }: TitleCardProps) {
             <Text style={styles.cardFormat}> · {title.total_episodes} EP</Text>
           )}
         </View>
-
         <View style={[styles.statusPill, { backgroundColor: statusCfg.bg }]}>
           <Text style={[styles.statusPillText, { color: statusCfg.text }]}>
             {statusCfg.label}
           </Text>
         </View>
-
         {is_decaying && (
-          <Text style={styles.decayWarning}>
-            ⚠ No activity for {daysSince} days
-          </Text>
+          <Text style={styles.decayWarning}>⚠ No activity for {daysSince} days</Text>
         )}
-      </View>
+      </TouchableOpacity>
 
-      <Text style={styles.cardArrow}>›</Text>
-    </TouchableOpacity>
+      {/* Slide toggle remove button */}
+      <TouchableOpacity
+        style={[
+          styles.removeBtn,
+          { backgroundColor: removing ? Colors.borderMid : Colors.coral }
+        ]}
+        onPress={handleRemovePress}
+        disabled={removing}
+        activeOpacity={0.7}
+      >
+        <View style={[styles.slideIndicator, removing ? styles.slideOff : styles.slideOn]} />
+        <Text style={styles.removeBtnText}>
+          {removing ? 'REMOVING' : 'REMOVE'}{'
+'}{removing ? '...' : '✕'}
+        </Text>
+      </TouchableOpacity>
+    </View>
   );
 }
 
@@ -237,6 +246,24 @@ export default function LibraryScreen() {
   }, [activeTab, selectedTags]);
 
   useEffect(() => { load(); }, [load]);
+
+  const handleRemove = async (titleId: string, titleName: string) => {
+    Alert.alert(
+      'Remove title?',
+      `Remove ${titleName} from your library? This cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            await execute(`DELETE FROM progress WHERE title_id = ?`, [titleId]);
+            await load();
+          },
+        },
+      ],
+    );
+  };
 
   const toggleTag = (tag: string) => {
     setSelectedTags(prev =>
@@ -317,6 +344,10 @@ export default function LibraryScreen() {
             onPress={() =>
               navigation.navigate('Tracker', { title_id: item.title.title_id })
             }
+            onRemove={() => handleRemove(
+              item.title.title_id,
+              item.title.english_title ?? item.title.romaji_title
+            )}
           />
         )}
       />
@@ -345,7 +376,7 @@ const styles = StyleSheet.create({
 
   list: { padding: Spacing.md, paddingBottom: Spacing.xxl },
 
-  card: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md, paddingVertical: Spacing.sm, borderBottomWidth: 1, borderBottomColor: Colors.borderMid },
+  card: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, paddingVertical: Spacing.sm, borderBottomWidth: 1, borderBottomColor: Colors.borderMid },
   cardDecaying: { backgroundColor: 'rgba(255,107,107,0.05)' },
   cardCover: { position: 'relative' },
   cardCoverImg: { width: 52, height: 72, borderWidth: 1, borderColor: Colors.borderMid, alignItems: 'center', justifyContent: 'center' },
@@ -361,6 +392,32 @@ const styles = StyleSheet.create({
   statusPillText: { fontFamily: Fonts.display, fontSize: 7, letterSpacing: 0.5 },
   decayWarning: { fontFamily: Fonts.body, fontSize: FontSizes.bodySm, color: Colors.coral, marginTop: 3 },
   cardArrow: { fontFamily: Fonts.body, fontSize: 28, color: Colors.borderMid },
+  removeBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+    borderWidth: 2,
+    borderColor: Colors.borderLo,
+    marginLeft: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 64,
+    gap: 4,
+  },
+  slideIndicator: {
+    width: 32,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: Colors.void,
+  },
+  slideOn: { alignSelf: 'flex-end' },
+  slideOff: { alignSelf: 'flex-start' },
+  removeBtnText: {
+    fontFamily: Fonts.display,
+    fontSize: 9,
+    color: Colors.void,
+    textAlign: 'center',
+    lineHeight: 14,
+  },
 
   empty: { alignItems: 'center', paddingTop: Spacing.xxl, gap: Spacing.sm },
   emptyIcon: { fontSize: 48 },
