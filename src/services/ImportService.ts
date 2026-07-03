@@ -11,7 +11,11 @@ import type {
 import { getTitleByAnilistId, upsertTitle, getEpisodesForTitle } from '../db/dao/TitleDAO';
 import { getProgress, getOrCreateProgress, recordWatchProgress } from '../db/dao/ProgressDAO';
 import { fetchUserList, fetchViewer, fetchTitleMetadata } from './AniListClient';
-import { execute, query } from '../db/database';
+import { execute, query, transaction } from '../db/database';
+
+// Corrupt-data guard only — real shows never get near this (One Piece is
+// ~1100 and counting).
+const MAX_STUBBED_EPISODES = 3000;
 
 // ─── STATUS MAPPING ──────────────────────────────────────────────────────────
 
@@ -87,15 +91,21 @@ async function resolveOrCreateTitle(entry: ImportedListEntry): Promise<string> {
       `INSERT OR IGNORE INTO season (season_id, title_id, season_number) VALUES (?,?,1)`,
       [seasonId, titleId],
     );
-    for (let n = 1; n <= entry.total_episodes; n++) {
-      const epId = uuidv4();
-      await execute(
-        `INSERT OR IGNORE INTO episode
-           (episode_id, title_id, season_id, absolute_number, season_episode, canonical_kind)
-         VALUES (?,?,?,?,?,'MAIN')`,
-        [epId, titleId, seasonId, n, n],
-      );
+    // Batched into one transaction per title — a full list import can hit
+    // this for hundreds of shows in one run, and long-runners like One
+    // Piece (1000+ episodes) would otherwise mean thousands of sequential
+    // awaited inserts, which is slow enough to feel like a hang or timeout.
+    const episodeCount = Math.min(entry.total_episodes, MAX_STUBBED_EPISODES);
+    const episodeOps = [];
+    for (let n = 1; n <= episodeCount; n++) {
+      episodeOps.push({
+        sql: `INSERT OR IGNORE INTO episode
+                (episode_id, title_id, season_id, absolute_number, season_episode, canonical_kind)
+              VALUES (?,?,?,?,?,'MAIN')`,
+        params: [uuidv4(), titleId, seasonId, n, n] as (string | number)[],
+      });
     }
+    await transaction(episodeOps);
   }
 
   return titleId;
