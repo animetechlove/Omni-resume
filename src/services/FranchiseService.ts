@@ -52,6 +52,16 @@ async function fetchRelations(anilistId: number): Promise<any> {
 // still shown on the map but dimmed as optional/skip-safe.
 const REQUIRED_RELATIONS = new Set(['PREQUEL', 'SEQUEL', 'PARENT']);
 
+// Relation types that actually indicate franchise membership — only these
+// are followed. CHARACTER (shared cast — usually crossover cameos, not the
+// same series) and OTHER (a loose AniList catch-all) are deliberately
+// excluded: following them pulls in tangentially-related or entirely
+// unrelated titles, badly over-grouping large franchises.
+const TRAVERSABLE_RELATIONS = new Set([
+  'PREQUEL', 'SEQUEL', 'PARENT', 'SIDE_STORY', 'SPIN_OFF',
+  'SUMMARY', 'ALTERNATIVE', 'COMPILATION', 'CONTAINS',
+]);
+
 function startDateKey(startDate?: { year?: number; month?: number; day?: number }): number | undefined {
   if (!startDate?.year) return undefined;
   return startDate.year * 10000 + (startDate.month ?? 1) * 100 + (startDate.day ?? 1);
@@ -107,6 +117,8 @@ export async function buildFranchiseForTitle(titleId: string, anilistId: number)
         if (edge.node.type !== 'ANIME') continue;
 
         const relationType: string = edge.relationType;
+        if (!TRAVERSABLE_RELATIONS.has(relationType)) continue;
+
         const isRequiredEdge = REQUIRED_RELATIONS.has(relationType);
         const existing = visited.get(edge.node.id);
 
@@ -226,6 +238,16 @@ export async function buildFranchiseForTitle(titleId: string, anilistId: number)
         [franchiseId, node.titleId, node.orderKey ?? null, node.isRequired ? 1 : 0],
       );
     }
+
+    // Prune any members left over from a previous, looser crawl (e.g. before
+    // CHARACTER/OTHER relations were excluded) — every sync recomputes the
+    // full membership, so anything not in `visited` no longer belongs here.
+    const keepIds = Array.from(visited.values()).map(n => n.titleId);
+    const placeholders = keepIds.map(() => '?').join(',');
+    await execute(
+      `DELETE FROM franchise_title WHERE franchise_id = ? AND title_id NOT IN (${placeholders})`,
+      [franchiseId, ...keepIds],
+    );
 
     console.log('[FranchiseService] Franchise built successfully with', visited.size, 'total titles');
   } catch (e) {

@@ -164,13 +164,14 @@ export default function FranchiseMapScreen() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (forceSync: boolean = false) => {
     setLoading(true);
     try {
-      let result = await getFranchiseForTitle(title_id);
+      let result = forceSync ? null : await getFranchiseForTitle(title_id);
 
-      // No local franchise grouping yet — try building one from AniList's
-      // relations graph (prequel/sequel/side-story chain) before giving up.
+      // No local franchise grouping yet (or a refresh was requested) — build/
+      // rebuild one from AniList's relations graph before giving up. Rebuilds
+      // also prune any stale members left over from an earlier, looser sync.
       if (!result) {
         const rootTitle = await getTitleById(title_id);
         if (rootTitle?.anilist_id) {
@@ -240,6 +241,10 @@ export default function FranchiseMapScreen() {
     navigation.navigate('Tracker', { title_id: entryTitleId });
   };
 
+  const handleRefresh = () => {
+    load(true);
+  };
+
   // Summary stats
   const completedCount = entries.filter(e => e.progress?.watch_status === 'COMPLETED').length;
   const totalCount = entries.filter(e => e.franchiseTitle.is_required).length;
@@ -281,6 +286,14 @@ export default function FranchiseMapScreen() {
         <Text style={styles.progressLabel}>
           {completedCount} / {totalCount} REQUIRED TITLES COMPLETE
         </Text>
+
+        <PixelButton
+          label="↻ REFRESH FROM ANILIST"
+          onPress={handleRefresh}
+          color={Colors.borderMid}
+          textColor={Colors.cream}
+          style={{ marginTop: Spacing.sm }}
+        />
       </Panel>
 
       {/* Legend */}
