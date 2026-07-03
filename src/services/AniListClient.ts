@@ -1,6 +1,8 @@
 import { Linking } from 'react-native';
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { v4 as uuidv4 } from 'uuid';
+import { execute } from '../db/database';
 import type { ImportedListEntry, MediaFormat } from '../types';
 
 const ANILIST_API   = 'https://graphql.anilist.co';
@@ -20,6 +22,22 @@ export async function handleOAuthCallback(code: string): Promise<string> {
   });
   const { access_token } = response.data as { access_token: string };
   await AsyncStorage.setItem(TOKEN_KEY, access_token);
+
+  // Record the connection so the rest of the app (settings, title screen)
+  // knows AniList is linked — previously the token was stored but never
+  // written to user_external_account, so "Connected" status never showed.
+  const viewer = await fetchViewer();
+  await execute(
+    `INSERT INTO user_external_account
+       (account_id, provider, external_user_id, access_token, connected_at, sync_mode)
+     VALUES (?, 'ANILIST', ?, ?, ?, 'ONE_TIME')
+     ON CONFLICT(provider) DO UPDATE SET
+       external_user_id=excluded.external_user_id,
+       access_token=excluded.access_token,
+       connected_at=excluded.connected_at`,
+    [uuidv4(), viewer ? String(viewer.id) : '', access_token, Date.now()],
+  );
+
   return access_token;
 }
 

@@ -26,9 +26,9 @@ export const Colors = {
 
 export const Fonts = {
   // Press Start 2P — chunky bitmap, titles / buttons / panel labels
-  display: 'PressStart2P-Regular',
+  display: 'PressStart2P_400Regular',
   // VT323 — legible pixel monospace, body / episode labels / data
-  body:    'VT323-Regular',
+  body:    'VT323_400Regular',
 } as const;
 
 export const FontSizes = {

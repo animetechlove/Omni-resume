@@ -3,17 +3,21 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import React, { useEffect, useRef } from 'react';
-import { Linking, StatusBar } from 'react-native';
+import { Linking, StatusBar, View, Text, ActivityIndicator } from 'react-native';
 import { NavigationContainer, NavigationContainerRef } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { useFonts, PressStart2P_400Regular } from '@expo-google-fonts/press-start-2p';
+import { VT323_400Regular } from '@expo-google-fonts/vt323';
 
 import { Colors, Fonts } from './src/theme/pixelTheme';
 import { getDatabase, runMigrations } from './src/db/database';
 import { NotificationService } from './src/services/NotificationService';
 import { handleInternalDeepLink } from './src/services/QRService';
+import { handleOAuthCallback } from './src/services/AniListClient';
 
 // ─── SCREENS ─────────────────────────────────────────────────────────────────
+import TitleScreen        from './src/screens/TitleScreen';
 import HomeScreen         from './src/screens/HomeScreen';
 import TrackerScreen      from './src/screens/TrackerScreen';
 import FranchiseMapScreen from './src/screens/FranchiseMapScreen';
@@ -26,6 +30,7 @@ import SearchScreen       from './src/screens/SearchScreen';
 
 // ─── NAVIGATION PARAM LIST ───────────────────────────────────────────────────
 export type RootStackParamList = {
+  Title:        undefined;
   Home:         undefined;
   Tracker:      { title_id: string };
   FranchiseMap: { title_id: string };
@@ -46,7 +51,8 @@ const linking = {
   prefixes: ['omniresume://'],
   config: {
     screens: {
-      Home:         '',
+      Title:        '',
+      Home:         'home',
       Tracker:      'tracker/:title_id',
       FranchiseMap: 'franchise/:title_id',
       Settings:     'settings',
@@ -63,7 +69,7 @@ const linking = {
 
 const screenOptions = {
   headerStyle:      { backgroundColor: Colors.panel },
-  headerTitleStyle: { fontFamily: 'PressStart2P-Regular', fontSize: 10, color: Colors.gold },
+  headerTitleStyle: { fontFamily: Fonts.display, fontSize: 10, color: Colors.gold },
   headerTintColor:  Colors.gold,
   animation:        'fade' as const,
 };
@@ -71,6 +77,10 @@ const screenOptions = {
 // ─── ROOT ────────────────────────────────────────────────────────────────────
 export default function App() {
   const navigationRef = useRef<NavigationContainerRef<RootStackParamList>>(null);
+  const [fontsLoaded] = useFonts({
+    PressStart2P_400Regular,
+    VT323_400Regular,
+  });
 
   useEffect(() => {
     // Bootstrap DB — runs migrations and sets up all tables
@@ -82,12 +92,30 @@ export default function App() {
     }
 
     const sub = Linking.addEventListener('url', ({ url }) => {
+      if (url.startsWith('omniresume://oauth/anilist')) {
+        const code = url.split('code=')[1]?.split('&')[0];
+        if (code) {
+          handleOAuthCallback(decodeURIComponent(code)).catch(e =>
+            console.error('[App] AniList OAuth callback failed:', e),
+          );
+        }
+        return;
+      }
       handleInternalDeepLink(url, platformId => {
         navigationRef.current?.navigate('PlatformTags', { scanned_platform_id: platformId });
       });
     });
     return () => sub.remove();
   }, []);
+
+  if (!fontsLoaded) {
+    return (
+      <View style={{ flex: 1, backgroundColor: Colors.void, alignItems: 'center', justifyContent: 'center', gap: 16 }}>
+        <ActivityIndicator color={Colors.gold} size="large" />
+        <Text style={{ color: Colors.dim, letterSpacing: 1 }}>LOADING...</Text>
+      </View>
+    );
+  }
 
   return (
     <SafeAreaProvider>
@@ -108,6 +136,7 @@ export default function App() {
         }}
       >
         <Stack.Navigator screenOptions={screenOptions}>
+          <Stack.Screen name="Title"        component={TitleScreen}        options={{ headerShown: false }} />
           <Stack.Screen name="Home"         component={HomeScreen}         options={{ headerShown: false }} />
           <Stack.Screen name="Tracker"      component={TrackerScreen}      options={{ title: 'TRACKER' }} />
           <Stack.Screen name="FranchiseMap" component={FranchiseMapScreen} options={{ title: 'FRANCHISE MAP' }} />
