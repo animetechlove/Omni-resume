@@ -8,10 +8,15 @@ import { Colors, Fonts, FontSizes, Spacing } from '../theme/pixelTheme';
 import { Panel, PixelButton } from '../components/PixelUI';
 import type { AniListSearchResult } from '../services/AniListClient';
 import { searchTitles } from '../services/AniListClient';
-import { upsertTitle, upsertSeason, upsertEpisode, upsertTitleTags, getTitleByAnilistId } from '../db/dao/TitleDAO';
+import { upsertTitle, upsertSeason, upsertTitleTags, getTitleByAnilistId } from '../db/dao/TitleDAO';
 import { getOrCreateProgress } from '../db/dao/ProgressDAO';
 import { buildFranchiseForTitle } from '../services/FranchiseService';
+import { transaction } from '../db/database';
 import { v4 as uuidv4 } from 'uuid';
+
+// Corrupt-data guard only — real shows never get near this (One Piece is
+// ~1100 and counting).
+const MAX_STUBBED_EPISODES = 3000;
 
 async function addTitleToLibrary(result: AniListSearchResult): Promise<string> {
   const now = Date.now();
@@ -34,12 +39,21 @@ async function addTitleToLibrary(result: AniListSearchResult): Promise<string> {
   const seasonId = uuidv4();
   await upsertSeason({ season_id: seasonId, title_id: titleId, season_number: 1 });
   if (result.total_episodes && result.total_episodes > 0) {
-    for (let n = 1; n <= result.total_episodes; n++) {
-      await upsertEpisode({
-        episode_id: uuidv4(), title_id: titleId, season_id: seasonId,
-        absolute_number: n, season_episode: n, canonical_kind: 'MAIN',
+    // Batched into one transaction — for shows with 1000+ episodes (One
+    // Piece), doing one awaited insert per episode would mean 1000+
+    // sequential SQLite round-trips, which can make adding the show feel
+    // like it hangs. A single transaction is one round-trip either way.
+    const episodeCount = Math.min(result.total_episodes, MAX_STUBBED_EPISODES);
+    const episodeOps = [];
+    for (let n = 1; n <= episodeCount; n++) {
+      episodeOps.push({
+        sql: `INSERT INTO episode (episode_id, title_id, season_id, absolute_number, season_episode, canonical_kind)
+              VALUES (?,?,?,?,?,?)
+              ON CONFLICT(title_id, absolute_number) DO NOTHING`,
+        params: [uuidv4(), titleId, seasonId, n, n, 'MAIN'] as (string | number)[],
       });
     }
+    await transaction(episodeOps);
   }
   if (result.tags.length > 0) await upsertTitleTags(titleId, result.tags);
   await getOrCreateProgress(titleId);

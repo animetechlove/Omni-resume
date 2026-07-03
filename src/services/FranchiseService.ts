@@ -7,8 +7,13 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { v4 as uuidv4 } from 'uuid';
-import { execute, query } from '../db/database';
-import { upsertTitle, upsertSeason, upsertEpisode } from '../db/dao/TitleDAO';
+import { execute, query, transaction } from '../db/database';
+import { upsertTitle, upsertSeason } from '../db/dao/TitleDAO';
+
+// Sane upper bound on stubbed episodes per title — real shows never get
+// anywhere near this (One Piece is ~1100 and counting). This only guards
+// against a malformed/corrupt AniList response, not real long-runners.
+const MAX_STUBBED_EPISODES = 3000;
 
 // ─── ANILIST RELATIONS QUERY ──────────────────────────────────────────────────
 
@@ -152,18 +157,31 @@ export async function buildFranchiseForTitle(titleId: string, anilistId: number)
           await upsertSeason({ season_id: seasonId, title_id: relatedTitleId, season_number: 1 });
 
           if (edge.node.episodes && edge.node.episodes > 0) {
-            for (let n = 1; n <= Math.min(edge.node.episodes, 100); n++) {
-              await upsertEpisode({
-                episode_id:      uuidv4(),
-                title_id:        relatedTitleId,
-                season_id:       seasonId,
-                absolute_number: n,
-                season_episode:  n,
-                canonical_kind:  edge.node.format === 'MOVIE' ? 'MOVIE' :
-                                 edge.node.format === 'OVA' ? 'OVA' :
-                                 edge.node.format === 'SPECIAL' ? 'SPECIAL' : 'MAIN',
+            // No artificial low cap here — long-running shows (Dragon Ball Z
+            // at 291, One Piece past 1000) need every episode stubbed, or
+            // later arcs end up with no episodes at all. Episode count is
+            // still bounded by MAX_STUBBED_EPISODES as a corrupt-data guard.
+            //
+            // All rows go through one transaction instead of one awaited
+            // insert per episode — for a 1000+ episode show, 1000+
+            // sequential round-trips would make the sync feel like it hangs
+            // (or block navigation on a slow device). A single transaction
+            // is one round-trip to SQLite regardless of episode count.
+            const kind = edge.node.format === 'MOVIE' ? 'MOVIE' :
+                        edge.node.format === 'OVA' ? 'OVA' :
+                        edge.node.format === 'SPECIAL' ? 'SPECIAL' : 'MAIN';
+            const episodeCount = Math.min(edge.node.episodes, MAX_STUBBED_EPISODES);
+            const episodeOps = [];
+            for (let n = 1; n <= episodeCount; n++) {
+              episodeOps.push({
+                sql: `INSERT INTO episode (episode_id, title_id, season_id, absolute_number, season_episode, canonical_kind)
+                      VALUES (?,?,?,?,?,?)
+                      ON CONFLICT(title_id, absolute_number) DO UPDATE SET
+                        canonical_kind=excluded.canonical_kind`,
+                params: [uuidv4(), relatedTitleId, seasonId, n, n, kind] as (string | number)[],
               });
             }
+            await transaction(episodeOps);
           }
 
           // Deliberately no getOrCreateProgress() here — a title/season/
