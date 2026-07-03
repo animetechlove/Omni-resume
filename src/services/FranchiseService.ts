@@ -57,7 +57,10 @@ function startDateKey(startDate?: { year?: number; month?: number; day?: number 
   return startDate.year * 10000 + (startDate.month ?? 1) * 100 + (startDate.day ?? 1);
 }
 
-const MAX_NODES = 40;
+// Large long-running franchises (Dragon Ball, Gundam, etc.) can have 40-60+
+// connected anime entries once every movie/OVA/special is counted — cap high
+// enough to cover those, while still bounding worst-case runaway crawls.
+const MAX_NODES = 80;
 
 interface VisitedNode {
   titleId: string;
@@ -69,7 +72,7 @@ interface VisitedNode {
 
 /**
  * Crawls AniList's relations graph outward from `titleId`/`anilistId`
- * (capped at 40 titles), resolving or creating local rows for every
+ * (capped at MAX_NODES titles), resolving or creating local rows for every
  * connected anime, and links the whole discovered set into one franchise
  * with computed watch order and required/optional status.
  */
@@ -186,9 +189,24 @@ export async function buildFranchiseForTitle(titleId: string, anilistId: number)
       if (existing.length > 0) { franchiseId = existing[0].franchise_id; break; }
     }
 
+    // Name the franchise after its earliest required (main-story) entry —
+    // not whichever title happened to trigger the sync. Opening "Dragon Ball
+    // Z" first shouldn't name the whole group "Dragon Ball Z" when "Dragon
+    // Ball" itself is part of the same connected set and came first.
+    let namingTitleId = titleId;
+    let earliestKey = Infinity;
+    for (const node of visited.values()) {
+      if (!node.isRequired) continue;
+      const key = node.orderKey ?? Infinity;
+      if (key < earliestKey) {
+        earliestKey = key;
+        namingTitleId = node.titleId;
+      }
+    }
+
     const rootTitleRow = await query<{ romaji_title: string; english_title?: string }>(
       `SELECT romaji_title, english_title FROM title WHERE title_id = ? LIMIT 1`,
-      [titleId],
+      [namingTitleId],
     );
     const franchiseName = rootTitleRow[0]?.english_title ?? rootTitleRow[0]?.romaji_title ?? 'Franchise';
 
