@@ -37,6 +37,14 @@ export async function upsertTitle(title: Omit<Title, 'title_id'> & { title_id?: 
      ON CONFLICT(title_id) DO UPDATE SET
        romaji_title=excluded.romaji_title, english_title=excluded.english_title,
        media_format=excluded.media_format, total_episodes=excluded.total_episodes,
+       cover_image_url=excluded.cover_image_url, updated_at=excluded.updated_at
+     ON CONFLICT(anilist_id) DO UPDATE SET
+       romaji_title=excluded.romaji_title, english_title=excluded.english_title,
+       media_format=excluded.media_format, total_episodes=excluded.total_episodes,
+       cover_image_url=excluded.cover_image_url, updated_at=excluded.updated_at
+     ON CONFLICT(mal_id) DO UPDATE SET
+       romaji_title=excluded.romaji_title, english_title=excluded.english_title,
+       media_format=excluded.media_format, total_episodes=excluded.total_episodes,
        cover_image_url=excluded.cover_image_url, updated_at=excluded.updated_at`,
     [titleId, title.anilist_id ?? null, title.mal_id ?? null, title.tmdb_id ?? null,
      title.romaji_title, title.english_title ?? null, title.media_format ?? null,

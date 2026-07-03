@@ -326,17 +326,27 @@ export default function SettingsScreen() {
   const subscribedIds = new Set(subscriptions.filter(s => s.is_active).map(s => s.platform_id));
 
   const handlePlatformToggle = async (platformId: string, nowSubscribed: boolean) => {
-    if (nowSubscribed) {
-      await upsertSubscription({
-        platform_id: platformId,
-        region,
-        source: 'DECLARED',
-        is_active: true,
-      });
-    } else {
-      await deactivateSubscription(platformId, region);
+    // Optimistic update — move the toggle immediately before the async DB write
+    const newSubs = nowSubscribed
+      ? [...subscriptions.filter(s => s.platform_id !== platformId), {
+          user_subscription_id: platformId,
+          platform_id: platformId,
+          region,
+          source: 'DECLARED' as const,
+          is_active: true,
+        }]
+      : subscriptions.map(s => s.platform_id === platformId ? { ...s, is_active: false } : s);
+    setSubscriptions(newSubs);
+    try {
+      if (nowSubscribed) {
+        await upsertSubscription({ platform_id: platformId, region, source: 'DECLARED', is_active: true });
+      } else {
+        await deactivateSubscription(platformId, region);
+      }
+    } catch (e) {
+      // Revert on error
+      await load();
     }
-    await load();
   };
 
   const handleRegionChange = async (code: string) => {
