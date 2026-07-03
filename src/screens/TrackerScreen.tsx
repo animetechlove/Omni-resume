@@ -49,6 +49,45 @@ function episodeState(
   return 'upcoming';
 }
 
+// ─── ARC PROGRESS ────────────────────────────────────────────────────────────
+
+interface ArcProgressInfo {
+  arcName: string;
+  percent: number;
+  completedArcs: number;
+  totalArcs: number;
+}
+
+/**
+ * Anime watchers tend to remember "I'm mid-Frieza Saga" more readily than
+ * "episode 87 of 291" — this reframes raw episode progress in arc terms.
+ * Returns null when the show has no curated arc data (most shows, for now).
+ */
+function computeArcProgress(
+  arcsIn: Arc[],
+  currentAbsolute: number,
+  totalEpisodes: number,
+): ArcProgressInfo | null {
+  if (arcsIn.length === 0 || totalEpisodes <= 0) return null;
+
+  const sorted = [...arcsIn].sort((a, b) => a.arc_index - b.arc_index);
+  const ranges = sorted.map((arc, i) => ({
+    arc,
+    start: arc.starts_at_abs,
+    end: i + 1 < sorted.length ? sorted[i + 1].starts_at_abs - 1 : totalEpisodes,
+  }));
+
+  const completedArcs = ranges.filter(r => currentAbsolute >= r.end).length;
+
+  // First arc not yet fully watched — or the last one, once everything is
+  const current = ranges.find(r => currentAbsolute < r.end) ?? ranges[ranges.length - 1];
+  const arcTotal = Math.max(1, current.end - current.start + 1);
+  const watchedInArc = Math.min(Math.max(currentAbsolute - current.start + 1, 0), arcTotal);
+  const percent = Math.round((watchedInArc / arcTotal) * 100);
+
+  return { arcName: current.arc.name, percent, completedArcs, totalArcs: ranges.length };
+}
+
 // ─── PLATFORM PICKER MODAL ────────────────────────────────────────────────────
 
 interface PlatformPickerProps {
@@ -334,6 +373,10 @@ export default function TrackerScreen() {
     e => e.episode_id === progress?.watch_episode_id,
   )?.absolute_number ?? 0;
 
+  const arcProgress = computeArcProgress(
+    arcs, currentAbsolute, title?.total_episodes ?? 0,
+  );
+
   // Episodes for the active season, ordered so paging by absolute number is stable
   const seasonEpisodes = episodes
     .filter(e => !activeSeason || e.season_id === activeSeason)
@@ -473,6 +516,21 @@ export default function TrackerScreen() {
           </View>
         </View>
 
+        {/* Arc progress — how far through the current saga, not just the episode count */}
+        {arcProgress && (
+          <View style={styles.arcProgressWrap}>
+            <Text style={styles.arcProgressText}>
+              {arcProgress.arcName.toUpperCase()} — {arcProgress.percent}%
+            </Text>
+            <View style={styles.arcProgressBarWrap}>
+              <View style={[styles.arcProgressBarFill, { width: `${arcProgress.percent}%` }]} />
+            </View>
+            <Text style={styles.arcProgressSubLabel}>
+              {arcProgress.completedArcs} / {arcProgress.totalArcs} ARCS COMPLETE
+            </Text>
+          </View>
+        )}
+
         {/* Shelf actions */}
         {progress && progress.watch_status !== 'COMPLETED' && (
           <View style={styles.shelfRow}>
@@ -593,6 +651,20 @@ const styles = StyleSheet.create({
     color: Colors.cream, lineHeight: 22, marginBottom: Spacing.xs,
   },
   titleMeta: { fontFamily: Fonts.body, fontSize: FontSizes.bodyMd, color: Colors.dim },
+  arcProgressWrap: { marginTop: Spacing.sm },
+  arcProgressText: {
+    fontFamily: Fonts.display, fontSize: FontSizes.displayXs,
+    color: Colors.gold, marginBottom: Spacing.xs, letterSpacing: 0.5,
+  },
+  arcProgressBarWrap: {
+    height: 6, backgroundColor: Colors.panelDeep,
+    borderWidth: 1, borderColor: Colors.borderMid, overflow: 'hidden',
+  },
+  arcProgressBarFill: { height: '100%', backgroundColor: Colors.mint },
+  arcProgressSubLabel: {
+    fontFamily: Fonts.body, fontSize: FontSizes.bodySm,
+    color: Colors.dim, marginTop: 4,
+  },
   shelfRow: { flexDirection: 'row', gap: Spacing.sm, marginTop: Spacing.sm },
   shelfBtn: {
     flex: 1, paddingVertical: Spacing.sm,
