@@ -150,6 +150,41 @@ export async function upsertEpisode(episode: Episode): Promise<void> {
   );
 }
 
+/**
+ * Fills in any episode rows missing between what's stored and `totalEpisodes`
+ * — needed for titles added before an episode-stub cap was lifted (or any
+ * ongoing show that's aired more episodes than were stubbed when it was
+ * added). Returns true if anything was actually added.
+ */
+export async function backfillMissingEpisodes(
+  titleId: string,
+  seasonId: string,
+  totalEpisodes: number,
+): Promise<boolean> {
+  if (totalEpisodes <= 0) return false;
+
+  const existing = await query<{ absolute_number: number }>(
+    `SELECT absolute_number FROM episode WHERE title_id=?`,
+    [titleId],
+  );
+  const have = new Set(existing.map(e => e.absolute_number));
+
+  const ops: Array<{ sql: string; params: (string | number)[] }> = [];
+  for (let n = 1; n <= totalEpisodes; n++) {
+    if (have.has(n)) continue;
+    ops.push({
+      sql: `INSERT INTO episode (episode_id, title_id, season_id, absolute_number, season_episode, canonical_kind)
+            VALUES (?,?,?,?,?,'MAIN')
+            ON CONFLICT(title_id, absolute_number) DO NOTHING`,
+      params: [uuidv4(), titleId, seasonId, n, n],
+    });
+  }
+  if (ops.length === 0) return false;
+
+  await transaction(ops);
+  return true;
+}
+
 // ─── PLATFORM & AVAILABILITY ──────────────────────────────────────────────────
 
 export async function getAllPlatforms(): Promise<Platform[]> {

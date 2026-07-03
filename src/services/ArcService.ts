@@ -31,9 +31,21 @@ export async function seedKnownArcs(titleId: string, anilistId: number): Promise
     });
   }
 
+  await assignEpisodesToArcs(titleId);
+  return true;
+}
+
+/**
+ * (Re)assigns every episode of `titleId` to whichever existing arc's range
+ * contains it. Safe to call repeatedly — in particular, needed after
+ * backfilling episode rows that didn't exist yet the first time arcs were
+ * seeded (they'd otherwise sit with arc_id null forever).
+ */
+export async function assignEpisodesToArcs(titleId: string): Promise<void> {
   // Re-read back so we have the real arc_ids (upsertArc generates a fresh
   // uuid each call, but ON CONFLICT keeps the original row's id).
   const savedArcs = await getArcsForTitle(titleId);
+  if (savedArcs.length === 0) return;
   const episodes = await getEpisodesForTitle(titleId);
 
   for (const ep of episodes) {
@@ -48,6 +60,4 @@ export async function seedKnownArcs(titleId: string, anilistId: number): Promise
       await upsertEpisode({ ...ep, arc_id: matched.arc_id });
     }
   }
-
-  return true;
 }

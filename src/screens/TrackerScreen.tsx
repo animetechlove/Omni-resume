@@ -20,12 +20,12 @@ import type {
 import {
   getTitleById, getSeasonsForTitle, getArcsForTitle,
   getEpisodesForTitle, getUserSubscriptions, getAllPlatforms,
-  getWatchHistory, getCompletionEvents,
+  getWatchHistory, getCompletionEvents, backfillMissingEpisodes,
 } from '../db/dao/TitleDAO';
 import {
   getOrCreateProgress, recordWatchProgress, setShelfStatus, startRewatch,
 } from '../db/dao/ProgressDAO';
-import { seedKnownArcs } from '../services/ArcService';
+import { seedKnownArcs, assignEpisodesToArcs } from '../services/ArcService';
 
 type RouteParams = { title_id: string };
 
@@ -337,11 +337,26 @@ export default function TrackerScreen() {
       getCompletionEvents(title_id),
     ]);
 
-    // No arc breakdown yet — try seeding a known one (e.g. Dragon Ball Z's
-    // sagas) before giving up and showing episodes as one flat list.
     let arcs = a;
     let episodesList = eps;
-    if (a.length === 0 && t?.anilist_id) {
+
+    // Fill in any episode rows missing between what's stored and the
+    // title's real total_episodes — covers titles added before an
+    // episode-stub cap was lifted, or ongoing shows that have aired more
+    // since being added (e.g. One Piece).
+    let backfilled = false;
+    if (t?.total_episodes && s.length > 0 && episodesList.length < t.total_episodes) {
+      try {
+        backfilled = await backfillMissingEpisodes(title_id, s[0].season_id, t.total_episodes);
+        if (backfilled) episodesList = await getEpisodesForTitle(title_id);
+      } catch (e) {
+        console.error('[TrackerScreen] episode backfill failed', e);
+      }
+    }
+
+    // No arc breakdown yet — try seeding a known one (e.g. Dragon Ball Z's
+    // sagas) before giving up and showing episodes as one flat list.
+    if (arcs.length === 0 && t?.anilist_id) {
       try {
         const seeded = await seedKnownArcs(title_id, t.anilist_id);
         if (seeded) {
@@ -352,6 +367,15 @@ export default function TrackerScreen() {
         }
       } catch (e) {
         console.error('[TrackerScreen] arc seeding failed', e);
+      }
+    } else if (arcs.length > 0 && backfilled) {
+      // Arcs already existed but we just backfilled new episode rows —
+      // those wouldn't otherwise ever get assigned to an arc.
+      try {
+        await assignEpisodesToArcs(title_id);
+        episodesList = await getEpisodesForTitle(title_id);
+      } catch (e) {
+        console.error('[TrackerScreen] arc reassignment failed', e);
       }
     }
 
