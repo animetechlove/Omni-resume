@@ -623,6 +623,16 @@ export default function TrackerScreen() {
         </TouchableOpacity>
       </Panel>
 
+      {/* TEMPORARY DEBUG PANEL — remove once the One Piece data issue is resolved */}
+      <Panel label="DEBUG INFO">
+        <Text style={styles.debugText}>title_id: {title.title_id}</Text>
+        <Text style={styles.debugText}>anilist_id: {String(title.anilist_id)}</Text>
+        <Text style={styles.debugText}>total_episodes: {String(title.total_episodes)}</Text>
+        <Text style={styles.debugText}>seasons.length: {seasons.length}</Text>
+        <Text style={styles.debugText}>arcs.length: {arcs.length}</Text>
+        <Text style={styles.debugText}>episodes.length: {episodes.length}</Text>
+      </Panel>
+
       {/* Season tabs */}
       <SeasonTabs
         seasons={seasons}
@@ -737,4 +747,5 @@ const styles = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: Colors.borderMid, paddingTop: Spacing.xs,
   },
   legendText: { fontFamily: Fonts.body, fontSize: FontSizes.bodySm, color: Colors.dim },
+  debugText: { fontFamily: Fonts.body, fontSize: FontSizes.bodySm, color: Colors.coral },
 });
