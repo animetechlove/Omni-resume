@@ -13,12 +13,13 @@ import {
 } from 'react-native';
 import { useRoute, useNavigation, RouteProp } from '@react-navigation/native';
 import { Colors, Fonts, FontSizes, Spacing, bevelBorder } from '../theme/pixelTheme';
-import { Panel, PixelButton, WatchStatusPill } from '../components/PixelUI';
+import { Panel, PixelButton } from '../components/PixelUI';
 import type {
   Title, Franchise, FranchiseTitle, Progress, WatchStatus,
 } from '../types';
 import { getFranchiseForTitle, getTitleById } from '../db/dao/TitleDAO';
 import { getProgress } from '../db/dao/ProgressDAO';
+import { buildFranchiseForTitle } from '../services/FranchiseService';
 
 type RouteParams = { title_id: string };
 
@@ -71,10 +72,6 @@ function FranchiseEntry({
 
   const status = progress?.watch_status ?? 'DISCOVERED';
   const cfg = statusCfg[status];
-
-  const epInfo = progress?.watch_episode_id
-    ? `EP ${progress.watch_timestamp_ms > 0 ? '?' : '?'}`
-    : '';
 
   return (
     <TouchableOpacity
@@ -164,55 +161,82 @@ export default function FranchiseMapScreen() {
   const [entries, setEntries] = useState<
     Array<{ franchiseTitle: FranchiseTitle; title: Title; progress: Progress | null }>
   >([]);
-  const [currentTitleId, setCurrentTitleId] = useState(title_id);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const result = await getFranchiseForTitle(title_id);
-    console.log('[FranchiseMap] result:', JSON.stringify(result?.franchise?.name), 'entries:', result?.entries?.length);
-    if (!result) { setLoading(false); return; }
+    try {
+      let result = await getFranchiseForTitle(title_id);
 
-    setFranchise(result.franchise);
+      // No local franchise grouping yet — try building one from AniList's
+      // relations graph (prequel/sequel/side-story chain) before giving up.
+      if (!result) {
+        const rootTitle = await getTitleById(title_id);
+        if (rootTitle?.anilist_id) {
+          setSyncing(true);
+          try {
+            await buildFranchiseForTitle(title_id, rootTitle.anilist_id);
+          } catch (e) {
+            console.error('[FranchiseMapScreen] franchise sync failed', e);
+          } finally {
+            setSyncing(false);
+          }
+          result = await getFranchiseForTitle(title_id);
+        }
+      }
 
-    // Load progress for every title in the franchise in parallel
-    const enriched = await Promise.all(
-      result.entries.map(async entry => {
-        // entry contains joined title fields — reshape into Title type
-        const t: Title = {
-          title_id:        (entry as any).t_id ?? entry.title_id,
-          anilist_id:      (entry as any).anilist_id,
-          mal_id:          undefined,
-          tmdb_id:         undefined,
-          romaji_title:    (entry as any).romaji_title ?? '',
-          english_title:   (entry as any).english_title,
-          media_format:    (entry as any).media_format,
-          total_episodes:  (entry as any).total_episodes,
-          cover_image_url: (entry as any).cover_image_url,
-          updated_at:      (entry as any).updated_at ?? Date.now(),
-        };
-        const p = await getProgress(t.title_id);
-        return {
-          franchiseTitle: {
-            franchise_id:         entry.franchise_id,
-            title_id:             t.title_id,
-            watch_order_position: entry.watch_order_position,
-            is_required:          Boolean(entry.is_required),
-          },
-          title: t,
-          progress: p,
-        };
-      }),
-    );
+      if (!result) {
+        setFranchise(null);
+        setEntries([]);
+        return;
+      }
 
-    setEntries(enriched);
-    setLoading(false);
+      setFranchise(result.franchise);
+
+      // Load progress for every title in the franchise in parallel
+      const enriched = await Promise.all(
+        result.entries.map(async entry => {
+          // entry contains joined title fields — reshape into Title type
+          const t: Title = {
+            title_id:        entry.t_id,
+            anilist_id:      entry.anilist_id,
+            mal_id:          entry.mal_id,
+            tmdb_id:         entry.tmdb_id,
+            romaji_title:    entry.romaji_title,
+            english_title:   entry.english_title,
+            media_format:    entry.media_format,
+            total_episodes:  entry.total_episodes,
+            cover_image_url: entry.cover_image_url,
+            updated_at:      entry.updated_at,
+          };
+          const p = await getProgress(t.title_id);
+          return {
+            franchiseTitle: {
+              franchise_id:         entry.franchise_id,
+              title_id:             t.title_id,
+              watch_order_position: entry.watch_order_position,
+              is_required:          Boolean(entry.is_required),
+            },
+            title: t,
+            progress: p,
+          };
+        }),
+      );
+
+      setEntries(enriched);
+    } catch (e) {
+      console.error('[FranchiseMapScreen] failed to load franchise map', e);
+      setFranchise(null);
+      setEntries([]);
+    } finally {
+      setLoading(false);
+    }
   }, [title_id]);
 
   useEffect(() => { load(); }, [load]);
 
   const handleEntryPress = (entryTitleId: string) => {
-    setCurrentTitleId(entryTitleId);
     navigation.navigate('Tracker', { title_id: entryTitleId });
   };
 
@@ -224,7 +248,9 @@ export default function FranchiseMapScreen() {
     return (
       <View style={styles.loading}>
         <ActivityIndicator color={Colors.gold} size="large" />
-        <Text style={styles.loadingText}>LOADING FRANCHISE MAP...</Text>
+        <Text style={styles.loadingText}>
+          {syncing ? 'SYNCING FRANCHISE DATA...' : 'LOADING FRANCHISE MAP...'}
+        </Text>
       </View>
     );
   }

@@ -1,12 +1,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // src/services/FranchiseService.ts
 // Automatically builds franchise connections from AniList relation data.
-// When a title is added, this fetches all related titles and links them.
+// Walks the relations graph outward (not just direct neighbors) so a whole
+// multi-season franchise — e.g. Tokyo Ghoul S1 → √A → :re → :re 2nd Season —
+// gets linked together in one pass, not just whichever title triggered it.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { v4 as uuidv4 } from 'uuid';
 import { execute, query } from '../db/database';
-import { upsertTitle, upsertSeason, upsertEpisode, upsertTitleTags } from '../db/dao/TitleDAO';
+import { upsertTitle, upsertSeason, upsertEpisode } from '../db/dao/TitleDAO';
 import { getOrCreateProgress } from '../db/dao/ProgressDAO';
 
 // ─── ANILIST RELATIONS QUERY ──────────────────────────────────────────────────
@@ -18,16 +20,16 @@ query ($id: Int) {
     title { romaji english }
     format episodes status
     coverImage { large }
-    tags { name }
-    nextAiringEpisode { episode airingAt }
+    startDate { year month day }
     relations {
       edges {
-        relationType
+        relationType(version: 2)
         node {
           id
           title { romaji english }
           format episodes status
           coverImage { large }
+          startDate { year month day }
           type
         }
       }
@@ -45,174 +47,169 @@ async function fetchRelations(anilistId: number): Promise<any> {
   return response.data.data.Media;
 }
 
-// ─── WATCH ORDER ─────────────────────────────────────────────────────────────
-// Maps AniList relation types to watch order priority.
-// Lower number = earlier in recommended watch order.
+// Relation types that keep a title in the "required" watch-order spine.
+// Everything else (side stories, spin-offs, alternates, summaries, etc.) is
+// still shown on the map but dimmed as optional/skip-safe.
+const REQUIRED_RELATIONS = new Set(['PREQUEL', 'SEQUEL', 'PARENT']);
 
-const RELATION_ORDER: Record<string, number> = {
-  PREQUEL:     0,
-  PARENT:      1,
-  SEQUEL:      2,
-  SIDE_STORY:  3,
-  ALTERNATIVE: 4,
-  SPIN_OFF:    5,
-  SUMMARY:     6,
-  OTHER:       7,
-};
+function startDateKey(startDate?: { year?: number; month?: number; day?: number }): number | undefined {
+  if (!startDate?.year) return undefined;
+  return startDate.year * 10000 + (startDate.month ?? 1) * 100 + (startDate.day ?? 1);
+}
+
+const MAX_NODES = 40;
+
+interface VisitedNode {
+  titleId: string;
+  isRequired: boolean;
+  orderKey?: number;
+}
 
 // ─── MAIN FUNCTION ────────────────────────────────────────────────────────────
 
+/**
+ * Crawls AniList's relations graph outward from `titleId`/`anilistId`
+ * (capped at 40 titles), resolving or creating local rows for every
+ * connected anime, and links the whole discovered set into one franchise
+ * with computed watch order and required/optional status.
+ */
 export async function buildFranchiseForTitle(titleId: string, anilistId: number): Promise<void> {
   try {
     console.log('[FranchiseService] Building franchise for anilist:', anilistId);
 
-    // Fetch the title and all its relations from AniList
-    const media = await fetchRelations(anilistId);
-    if (!media) return;
+    const visited = new Map<number, VisitedNode>();
+    visited.set(anilistId, { titleId, isRequired: true });
+    const queue: number[] = [anilistId];
 
-    // Filter to only anime relations
-    const allRelations = media.relations?.edges ?? [];
-    console.log('[FranchiseService] Total relations from AniList:', allRelations.length);
-    const animeRelations = allRelations.filter(
-      (edge: any) => edge.node.type === 'ANIME',
-    );
-    console.log('[FranchiseService] Anime relations:', animeRelations.length);
-    animeRelations.forEach((e: any) => console.log(' -', e.relationType, e.node.title.romaji));
+    while (queue.length > 0 && visited.size < MAX_NODES) {
+      const currentAnilistId = queue.shift()!;
+      const currentTitleId = visited.get(currentAnilistId)!.titleId;
 
-    if (animeRelations.length === 0) {
+      let media: any;
+      try {
+        media = await fetchRelations(currentAnilistId);
+      } catch (e) {
+        console.error('[FranchiseService] failed to fetch relations for', currentAnilistId, e);
+        continue;
+      }
+      if (!media) continue;
+
+      const currentNode = visited.get(currentAnilistId)!;
+      if (currentNode.orderKey === undefined) {
+        currentNode.orderKey = startDateKey(media.startDate);
+      }
+
+      const edges = media.relations?.edges ?? [];
+      for (const edge of edges) {
+        if (edge.node.type !== 'ANIME') continue;
+
+        const relationType: string = edge.relationType;
+        const isRequiredEdge = REQUIRED_RELATIONS.has(relationType);
+        const existing = visited.get(edge.node.id);
+
+        if (existing) {
+          if (isRequiredEdge) existing.isRequired = true;
+          continue;
+        }
+
+        // Resolve or create a local row for this related title
+        let relatedTitleId: string;
+        const existingTitle = await query<{ title_id: string }>(
+          `SELECT title_id FROM title WHERE anilist_id = ? LIMIT 1`,
+          [edge.node.id],
+        );
+
+        if (existingTitle.length > 0) {
+          relatedTitleId = existingTitle[0].title_id;
+        } else {
+          relatedTitleId = uuidv4();
+          await upsertTitle({
+            title_id:        relatedTitleId,
+            anilist_id:      edge.node.id,
+            romaji_title:    edge.node.title.romaji,
+            english_title:   edge.node.title.english ?? undefined,
+            media_format:    edge.node.format,
+            total_episodes:  edge.node.episodes ?? undefined,
+            cover_image_url: edge.node.coverImage?.large ?? undefined,
+            updated_at:      Date.now(),
+          });
+
+          const seasonId = uuidv4();
+          await upsertSeason({ season_id: seasonId, title_id: relatedTitleId, season_number: 1 });
+
+          if (edge.node.episodes && edge.node.episodes > 0) {
+            for (let n = 1; n <= Math.min(edge.node.episodes, 100); n++) {
+              await upsertEpisode({
+                episode_id:      uuidv4(),
+                title_id:        relatedTitleId,
+                season_id:       seasonId,
+                absolute_number: n,
+                season_episode:  n,
+                canonical_kind:  edge.node.format === 'MOVIE' ? 'MOVIE' :
+                                 edge.node.format === 'OVA' ? 'OVA' :
+                                 edge.node.format === 'SPECIAL' ? 'SPECIAL' : 'MAIN',
+              });
+            }
+          }
+
+          await getOrCreateProgress(relatedTitleId);
+        }
+
+        visited.set(edge.node.id, {
+          titleId: relatedTitleId,
+          isRequired: isRequiredEdge,
+          orderKey: startDateKey(edge.node.startDate),
+        });
+
+        await execute(
+          `INSERT OR IGNORE INTO title_relation (title_relation_id, from_title_id, to_title_id, relation_type)
+           VALUES (?, ?, ?, ?)`,
+          [uuidv4(), currentTitleId, relatedTitleId, relationType],
+        );
+
+        queue.push(edge.node.id);
+      }
+    }
+
+    if (visited.size <= 1) {
       console.log('[FranchiseService] No anime relations found');
       return;
     }
 
-    // Check if a franchise already exists for any of these related titles
+    // Reuse an existing franchise if any discovered title already belongs to one
     let franchiseId: string | null = null;
-
-    for (const edge of animeRelations) {
-      const relatedAnilistId = edge.node.id;
+    for (const node of visited.values()) {
       const existing = await query<{ franchise_id: string }>(
-        `SELECT ft.franchise_id FROM franchise_title ft
-         JOIN title t ON t.title_id = ft.title_id
-         WHERE t.anilist_id = ? LIMIT 1`,
-        [relatedAnilistId],
-      );
-      if (existing.length > 0) {
-        franchiseId = existing[0].franchise_id;
-        break;
-      }
-    }
-
-    // Also check if the main title already has a franchise
-    if (!franchiseId) {
-      const existingMain = await query<{ franchise_id: string }>(
         `SELECT franchise_id FROM franchise_title WHERE title_id = ? LIMIT 1`,
-        [titleId],
+        [node.titleId],
       );
-      if (existingMain.length > 0) {
-        franchiseId = existingMain[0].franchise_id;
-      }
+      if (existing.length > 0) { franchiseId = existing[0].franchise_id; break; }
     }
 
-    // Create a new franchise if none exists
+    const rootTitleRow = await query<{ romaji_title: string; english_title?: string }>(
+      `SELECT romaji_title, english_title FROM title WHERE title_id = ? LIMIT 1`,
+      [titleId],
+    );
+    const franchiseName = rootTitleRow[0]?.english_title ?? rootTitleRow[0]?.romaji_title ?? 'Franchise';
+
     if (!franchiseId) {
       franchiseId = uuidv4();
-      const franchiseName = media.title.english ?? media.title.romaji;
-      await execute(
-        `INSERT OR IGNORE INTO franchise (franchise_id, name) VALUES (?, ?)`,
-        [franchiseId, franchiseName],
-      );
+      await execute(`INSERT OR IGNORE INTO franchise (franchise_id, name) VALUES (?, ?)`, [franchiseId, franchiseName]);
       console.log('[FranchiseService] Created franchise:', franchiseName);
     }
 
-    // Add the main title to the franchise
-    await execute(
-      `INSERT OR IGNORE INTO franchise_title (franchise_id, title_id, watch_order_position, is_required)
-       VALUES (?, ?, 1.0, 1)`,
-      [franchiseId, titleId],
-    );
-
-    // Add all related anime titles to the franchise
-    let position = 2.0;
-    for (const edge of animeRelations) {
-      const node = edge.node;
-      const relationType: string = edge.relationType;
-
-      // Only include anime (not manga adaptations etc)
-      if (node.type !== 'ANIME') continue;
-
-      // Check if this related title is already in the local DB
-      let relatedTitleId: string | null = null;
-      const existingTitle = await query<{ title_id: string }>(
-        `SELECT title_id FROM title WHERE anilist_id = ? LIMIT 1`,
-        [node.id],
-      );
-
-      if (existingTitle.length > 0) {
-        relatedTitleId = existingTitle[0].title_id;
-      } else {
-        // Create a stub title row for the related title
-        relatedTitleId = uuidv4();
-        await upsertTitle({
-          title_id:        relatedTitleId,
-          anilist_id:      node.id,
-          romaji_title:    node.title.romaji,
-          english_title:   node.title.english ?? undefined,
-          media_format:    node.format,
-          total_episodes:  node.episodes ?? undefined,
-          cover_image_url: node.coverImage?.large ?? undefined,
-          updated_at:      Date.now(),
-        });
-
-        // Create a default season
-        const seasonId = uuidv4();
-        await upsertSeason({
-          season_id:     seasonId,
-          title_id:      relatedTitleId,
-          season_number: 1,
-        });
-
-        // Stub episodes if count is known
-        if (node.episodes && node.episodes > 0) {
-          for (let n = 1; n <= Math.min(node.episodes, 100); n++) {
-            await upsertEpisode({
-              episode_id:      uuidv4(),
-              title_id:        relatedTitleId,
-              season_id:       seasonId,
-              absolute_number: n,
-              season_episode:  n,
-              canonical_kind:  node.format === 'MOVIE' ? 'MOVIE' :
-                               node.format === 'OVA' ? 'OVA' :
-                               node.format === 'SPECIAL' ? 'SPECIAL' : 'MAIN',
-            });
-          }
-        }
-
-        // Create progress row so it shows in franchise map
-        await getOrCreateProgress(relatedTitleId);
-      }
-
-      // Add relation record
+    for (const node of visited.values()) {
       await execute(
-        `INSERT OR IGNORE INTO title_relation
-           (title_relation_id, from_title_id, to_title_id, relation_type)
-         VALUES (?, ?, ?, ?)`,
-        [uuidv4(), titleId, relatedTitleId, relationType],
+        `INSERT INTO franchise_title (franchise_id, title_id, watch_order_position, is_required)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(franchise_id, title_id) DO UPDATE SET
+           watch_order_position = excluded.watch_order_position,
+           is_required = CASE WHEN excluded.is_required = 1 THEN 1 ELSE franchise_title.is_required END`,
+        [franchiseId, node.titleId, node.orderKey ?? null, node.isRequired ? 1 : 0],
       );
-
-      // Add to franchise with watch order
-      const orderPosition = (RELATION_ORDER[relationType] ?? 5) + position;
-      const isRequired = !['SUMMARY', 'ALTERNATIVE', 'SPIN_OFF'].includes(relationType) ? 1 : 0;
-
-      await execute(
-        `INSERT OR IGNORE INTO franchise_title
-           (franchise_id, title_id, watch_order_position, is_required)
-         VALUES (?, ?, ?, ?)`,
-        [franchiseId, relatedTitleId, orderPosition, isRequired],
-      );
-
-      position += 0.1;
     }
 
-    console.log('[FranchiseService] Franchise built successfully with', animeRelations.length, 'related titles');
+    console.log('[FranchiseService] Franchise built successfully with', visited.size, 'total titles');
   } catch (e) {
     console.error('[FranchiseService] Error building franchise:', e);
   }

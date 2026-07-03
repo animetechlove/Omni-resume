@@ -37,14 +37,6 @@ export async function upsertTitle(title: Omit<Title, 'title_id'> & { title_id?: 
      ON CONFLICT(title_id) DO UPDATE SET
        romaji_title=excluded.romaji_title, english_title=excluded.english_title,
        media_format=excluded.media_format, total_episodes=excluded.total_episodes,
-       cover_image_url=excluded.cover_image_url, updated_at=excluded.updated_at
-     ON CONFLICT(anilist_id) DO UPDATE SET
-       romaji_title=excluded.romaji_title, english_title=excluded.english_title,
-       media_format=excluded.media_format, total_episodes=excluded.total_episodes,
-       cover_image_url=excluded.cover_image_url, updated_at=excluded.updated_at
-     ON CONFLICT(mal_id) DO UPDATE SET
-       romaji_title=excluded.romaji_title, english_title=excluded.english_title,
-       media_format=excluded.media_format, total_episodes=excluded.total_episodes,
        cover_image_url=excluded.cover_image_url, updated_at=excluded.updated_at`,
     [titleId, title.anilist_id ?? null, title.mal_id ?? null, title.tmdb_id ?? null,
      title.romaji_title, title.english_title ?? null, title.media_format ?? null,
@@ -273,7 +265,12 @@ export async function getRelatedTitles(
 
 export async function getFranchiseForTitle(titleId: string): Promise<{
   franchise: Franchise;
-  entries: Array<FranchiseTitle & { title: Title }>;
+  entries: Array<FranchiseTitle & {
+    t_id: string; romaji_title: string; english_title?: string;
+    media_format?: Title['media_format']; total_episodes?: number;
+    cover_image_url?: string; updated_at: number;
+    anilist_id?: number; mal_id?: number; tmdb_id?: number;
+  }>;
 } | null> {
   const frRows = await query<{ franchise_id: string; name: string; description?: string }>(
     `SELECT f.* FROM franchise f
@@ -284,9 +281,15 @@ export async function getFranchiseForTitle(titleId: string): Promise<{
   if (frRows.length === 0) return null;
 
   const franchise: Franchise = frRows[0];
-  const entries = await query<FranchiseTitle & { title: Title }>(
+  const entries = await query<FranchiseTitle & {
+    t_id: string; romaji_title: string; english_title?: string;
+    media_format?: Title['media_format']; total_episodes?: number;
+    cover_image_url?: string; updated_at: number;
+    anilist_id?: number; mal_id?: number; tmdb_id?: number;
+  }>(
     `SELECT ft.*, t.title_id as t_id, t.romaji_title, t.english_title,
-       t.media_format, t.total_episodes, t.cover_image_url, t.updated_at, t.anilist_id
+       t.media_format, t.total_episodes, t.cover_image_url, t.updated_at,
+       t.anilist_id, t.mal_id, t.tmdb_id
      FROM franchise_title ft
      JOIN title t ON t.title_id = ft.title_id
      WHERE ft.franchise_id=?
