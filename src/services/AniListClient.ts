@@ -1,4 +1,4 @@
-import { Linking } from 'react-native';
+import { Linking, Alert } from 'react-native';
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { v4 as uuidv4 } from 'uuid';
@@ -8,11 +8,23 @@ import type { ImportedListEntry, MediaFormat } from '../types';
 const ANILIST_API   = 'https://graphql.anilist.co';
 const ANILIST_AUTH  = 'https://anilist.co/api/v2/oauth/authorize';
 const ANILIST_TOKEN = 'https://anilist.co/api/v2/oauth/token';
-const CLIENT_ID     = process.env.ANILIST_CLIENT_ID ?? 'YOUR_ANILIST_CLIENT_ID';
+// EXPO_PUBLIC_ prefix is required — Expo/Metro only inlines env vars with
+// this prefix into the bundle automatically (no babel plugin needed). A
+// plain ANILIST_CLIENT_ID here would always resolve to undefined at
+// runtime, silently falling through to the placeholder below.
+const CLIENT_ID     = process.env.EXPO_PUBLIC_ANILIST_CLIENT_ID ?? 'YOUR_ANILIST_CLIENT_ID';
 const REDIRECT_URI  = 'omniresume://oauth/anilist';
 const TOKEN_KEY     = '@omniresume/anilist_token';
 
 export function launchOAuthFlow(): void {
+  if (CLIENT_ID === 'YOUR_ANILIST_CLIENT_ID') {
+    Alert.alert(
+      'AniList not configured',
+      'No AniList client ID is set up for this app yet. Register one at anilist.co/settings/developer ' +
+      '(redirect URI: omniresume://oauth/anilist), then add it as EXPO_PUBLIC_ANILIST_CLIENT_ID in a .env file.',
+    );
+    return;
+  }
   Linking.openURL(`${ANILIST_AUTH}?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_type=code`);
 }
 
@@ -45,14 +57,42 @@ async function getStoredToken(): Promise<string | null> {
   return AsyncStorage.getItem(TOKEN_KEY);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// AniList's public API rate-limits anonymous requests well under 90/min in
+// practice — search-as-you-type, list import, and franchise sync can all
+// burn through that quickly. Retry once or twice with backoff instead of
+// surfacing a raw 429 to the user.
+const RATE_LIMIT_MAX_RETRIES = 3;
+const RATE_LIMIT_DEFAULT_BACKOFF_MS = 3000;
+
 async function gql<T>(query: string, variables?: object): Promise<T> {
   const token = await getStoredToken();
-  const response = await axios.post<{ data: T; errors?: object[] }>(
-    ANILIST_API, { query, variables },
-    { headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) } },
-  );
-  if (response.data.errors) throw new Error(`AniList error: ${JSON.stringify(response.data.errors)}`);
-  return response.data.data;
+
+  for (let attempt = 0; attempt <= RATE_LIMIT_MAX_RETRIES; attempt++) {
+    try {
+      const response = await axios.post<{ data: T; errors?: object[] }>(
+        ANILIST_API, { query, variables },
+        { headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) } },
+      );
+      if (response.data.errors) throw new Error(`AniList error: ${JSON.stringify(response.data.errors)}`);
+      return response.data.data;
+    } catch (e: any) {
+      const status = e?.response?.status;
+      if (status === 429 && attempt < RATE_LIMIT_MAX_RETRIES) {
+        const retryAfterHeader = e.response?.headers?.['retry-after'];
+        const waitMs = retryAfterHeader
+          ? Number(retryAfterHeader) * 1000
+          : RATE_LIMIT_DEFAULT_BACKOFF_MS * (attempt + 1);
+        await sleep(waitMs);
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new Error('unreachable');
 }
 
 export async function fetchTitleMetadata(anilistId: number): Promise<any> {

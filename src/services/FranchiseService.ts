@@ -41,14 +41,45 @@ query ($id: Int) {
   }
 }`;
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// AniList's public API rate-limits anonymous requests fairly aggressively
+// (well under 90/min in practice). A multi-node franchise crawl can burn
+// through that budget on its own, on top of whatever else (search, list
+// import, other franchise syncs) already used some of it this session.
+const RATE_LIMIT_MAX_RETRIES = 3;
+const RATE_LIMIT_DEFAULT_BACKOFF_MS = 3000;
+
 async function fetchRelations(anilistId: number): Promise<any> {
   const axios = (await import('axios')).default;
-  const response = await axios.post(
-    'https://graphql.anilist.co',
-    { query: RELATIONS_QUERY, variables: { id: anilistId } },
-    { headers: { 'Content-Type': 'application/json' } },
-  );
-  return response.data.data.Media;
+
+  for (let attempt = 0; attempt <= RATE_LIMIT_MAX_RETRIES; attempt++) {
+    try {
+      const response = await axios.post(
+        'https://graphql.anilist.co',
+        { query: RELATIONS_QUERY, variables: { id: anilistId } },
+        { headers: { 'Content-Type': 'application/json' } },
+      );
+      return response.data.data.Media;
+    } catch (e: any) {
+      const status = e?.response?.status;
+      if (status === 429 && attempt < RATE_LIMIT_MAX_RETRIES) {
+        // AniList sends Retry-After in seconds when it has an opinion;
+        // otherwise back off a little longer each attempt.
+        const retryAfterHeader = e.response?.headers?.['retry-after'];
+        const waitMs = retryAfterHeader
+          ? Number(retryAfterHeader) * 1000
+          : RATE_LIMIT_DEFAULT_BACKOFF_MS * (attempt + 1);
+        console.log(`[FranchiseService] rate-limited, retrying in ${waitMs}ms`);
+        await sleep(waitMs);
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new Error('unreachable');
 }
 
 // Relation types that keep a title in the "required" watch-order spine.
@@ -98,9 +129,18 @@ export async function buildFranchiseForTitle(titleId: string, anilistId: number)
     visited.set(anilistId, { titleId, isRequired: true });
     const queue: number[] = [anilistId];
 
+    // Space out requests so a big franchise (Dragon Ball, One Piece side
+    // content, etc.) doesn't trip AniList's rate limit on its own — the
+    // retry-with-backoff in fetchRelations is the real safety net, but
+    // avoiding 429s in the first place means a much faster, quieter sync.
+    let requestCount = 0;
+
     while (queue.length > 0 && visited.size < MAX_NODES) {
       const currentAnilistId = queue.shift()!;
       const currentTitleId = visited.get(currentAnilistId)!.titleId;
+
+      if (requestCount > 0) await sleep(1000);
+      requestCount++;
 
       let media: any;
       try {
