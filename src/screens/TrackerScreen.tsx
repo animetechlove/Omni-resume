@@ -5,7 +5,7 @@
 // (§13.3), and shelf status management (§13.2).
 // ─────────────────────────────────────────────────────────────────────────────
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   Modal, Alert, Image, Switch,
@@ -28,6 +28,14 @@ import {
 import { seedKnownArcs } from '../services/ArcService';
 
 type RouteParams = { title_id: string };
+
+// Episodes per page. Long-runners (One Piece, Dragon Ball Z) would otherwise
+// render every episode of the season as tiles in one unbounded grid — slow
+// to render and painful to scroll. Paginating by absolute episode number
+// (not per-arc) means a show under 100 episodes (Tokyo Ghoul) stays a
+// single page, while a 291-episode show (DBZ) becomes 3 and a 1000+
+// episode show (One Piece) becomes ~11.
+const PAGE_SIZE = 100;
 
 // ─── EPISODE STATE HELPER ─────────────────────────────────────────────────────
 
@@ -188,6 +196,72 @@ const histStyles = StyleSheet.create({
   badge: { fontFamily: Fonts.display, fontSize: FontSizes.displayXs },
 });
 
+// ─── PAGE NAV ────────────────────────────────────────────────────────────────
+
+interface PageNavProps {
+  page: number;
+  totalPages: number;
+  totalEpisodes: number;
+  onSelect: (page: number) => void;
+}
+
+function PageNav({ page, totalPages, totalEpisodes, onSelect }: PageNavProps) {
+  if (totalPages <= 1) return null;
+  const rangeStart = page * PAGE_SIZE + 1;
+  const rangeEnd = Math.min((page + 1) * PAGE_SIZE, totalEpisodes);
+  return (
+    <View style={pageNavStyles.wrap}>
+      <Text style={pageNavStyles.rangeLabel}>EP {rangeStart}–{rangeEnd} OF {totalEpisodes}</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={pageNavStyles.row}>
+        <TouchableOpacity
+          disabled={page === 0}
+          onPress={() => onSelect(page - 1)}
+          style={[pageNavStyles.pageBtn, page === 0 && pageNavStyles.pageBtnDisabled]}
+        >
+          <Text style={[pageNavStyles.pageBtnText, page === 0 && pageNavStyles.pageBtnTextDisabled]}>‹</Text>
+        </TouchableOpacity>
+        {Array.from({ length: totalPages }, (_, i) => (
+          <TouchableOpacity
+            key={i}
+            onPress={() => onSelect(i)}
+            style={[pageNavStyles.pageBtn, i === page && pageNavStyles.pageBtnActive]}
+          >
+            <Text style={[pageNavStyles.pageBtnText, i === page && pageNavStyles.pageBtnTextActive]}>
+              {i + 1}
+            </Text>
+          </TouchableOpacity>
+        ))}
+        <TouchableOpacity
+          disabled={page === totalPages - 1}
+          onPress={() => onSelect(page + 1)}
+          style={[pageNavStyles.pageBtn, page === totalPages - 1 && pageNavStyles.pageBtnDisabled]}
+        >
+          <Text style={[pageNavStyles.pageBtnText, page === totalPages - 1 && pageNavStyles.pageBtnTextDisabled]}>›</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    </View>
+  );
+}
+
+const pageNavStyles = StyleSheet.create({
+  wrap: { marginTop: Spacing.sm },
+  rangeLabel: {
+    fontFamily: Fonts.display, fontSize: 8,
+    color: Colors.dim, letterSpacing: 1, marginBottom: Spacing.xs,
+  },
+  row: { gap: Spacing.xs },
+  pageBtn: {
+    minWidth: 32, paddingHorizontal: Spacing.xs, paddingVertical: 6,
+    borderWidth: 2, borderColor: Colors.borderMid,
+    backgroundColor: Colors.panelDeep, alignItems: 'center', justifyContent: 'center',
+  },
+  pageBtnActive: { borderColor: Colors.gold, backgroundColor: Colors.panel },
+  pageBtnDisabled: { opacity: 0.4 },
+  pageBtnText: { fontFamily: Fonts.display, fontSize: FontSizes.displayXs, color: Colors.dim },
+  pageBtnTextActive: { color: Colors.gold },
+  pageBtnTextDisabled: { color: Colors.borderMid },
+});
+
 // ─── MAIN SCREEN ─────────────────────────────────────────────────────────────
 
 export default function TrackerScreen() {
@@ -208,6 +282,8 @@ export default function TrackerScreen() {
   const [activeSeason, setActiveSeason] = useState<string>('');
   const [pickerVisible, setPickerVisible] = useState(false);
   const [pendingEpisode, setPendingEpisode] = useState<Episode | null>(null);
+  const [rawPage, setRawPage] = useState(0);
+  const didInitPageRef = useRef(false);
 
   const load = useCallback(async () => {
     const [t, p, s, a, eps, plats, subs, hist, comps] = await Promise.all([
@@ -258,18 +334,35 @@ export default function TrackerScreen() {
     e => e.episode_id === progress?.watch_episode_id,
   )?.absolute_number ?? 0;
 
-  // Episodes for the active season
-  const seasonEpisodes = episodes.filter(e =>
-    !activeSeason || e.season_id === activeSeason,
-  );
+  // Episodes for the active season, ordered so paging by absolute number is stable
+  const seasonEpisodes = episodes
+    .filter(e => !activeSeason || e.season_id === activeSeason)
+    .sort((a, b) => a.absolute_number - b.absolute_number);
 
-  // Group episodes by arc within the active season
+  // Paginate by absolute episode number, not per-arc — a 291-episode show
+  // (DBZ) becomes 3 pages, a 1000+ episode show (One Piece) becomes ~11,
+  // and anything under 100 episodes (Tokyo Ghoul) stays a single page.
+  const totalPages = Math.max(1, Math.ceil(seasonEpisodes.length / PAGE_SIZE));
+  const page = Math.min(rawPage, totalPages - 1);
+  const pageEpisodes = seasonEpisodes.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  // Land on the page containing the episode the user last watched, rather
+  // than always page 1 — so continuing a long show doesn't mean paging
+  // forward through everything already watched.
+  useEffect(() => {
+    if (didInitPageRef.current || seasonEpisodes.length === 0) return;
+    const idx = seasonEpisodes.findIndex(e => e.episode_id === progress?.watch_episode_id);
+    setRawPage(idx >= 0 ? Math.floor(idx / PAGE_SIZE) : 0);
+    didInitPageRef.current = true;
+  }, [seasonEpisodes, progress]);
+
+  // Group episodes by arc within the active season and page
   type ArcGroup = { arc: Arc | null; episodes: Episode[] };
   const arcGroups: ArcGroup[] = [];
   const arcMap = new Map(arcs.map(a => [a.arc_id, a]));
 
   const grouped = new Map<string | null, Episode[]>();
-  for (const ep of seasonEpisodes) {
+  for (const ep of pageEpisodes) {
     const key = ep.arc_id ?? null;
     if (!grouped.has(key)) grouped.set(key, []);
     grouped.get(key)!.push(ep);
@@ -424,7 +517,7 @@ export default function TrackerScreen() {
       <SeasonTabs
         seasons={seasons}
         active={activeSeason}
-        onSelect={setActiveSeason}
+        onSelect={id => { setActiveSeason(id); setRawPage(0); }}
       />
 
       {/* Arc / episode groups */}
@@ -461,6 +554,14 @@ export default function TrackerScreen() {
           </View>
         </Panel>
       ))}
+
+      {/* Episode pages — only shown once a season crosses 100 episodes */}
+      <PageNav
+        page={page}
+        totalPages={totalPages}
+        totalEpisodes={seasonEpisodes.length}
+        onSelect={setRawPage}
+      />
 
       {/* Watch history */}
       <WatchHistoryPanel history={history} completions={completions} />
