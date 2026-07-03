@@ -59,8 +59,7 @@ function SlideToggle({ isOn, onPress }: SlideToggleProps) {
       activeOpacity={0.7}
     >
       <View style={[s.toggleBar, isOn ? s.toggleBarOn : s.toggleBarOff]} />
-      <Text style={s.toggleLabel}>{isOn ? "OPEN" : "ADD"}{"
-"}{isOn ? ">" : "+"}</Text>
+      <Text style={s.toggleLabel}>{isOn ? "OPEN" : "ADD"}{"\n"}{isOn ? ">" : "+"}</Text>
     </TouchableOpacity>
   );
 }
@@ -115,7 +114,7 @@ export default function SearchScreen() {
   const [searching, setSearching] = useState(false);
   const [addedIds, setAddedIds] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const doSearch = useCallback(async (text: string) => {
     if (text.trim().length < 2) { setResults([]); return; }

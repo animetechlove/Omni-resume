@@ -8,7 +8,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  Image, TextInput, FlatList,
+  Image, TextInput, FlatList, Alert,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Colors, Fonts, FontSizes, Spacing, bevelBorder, StatusColors } from '../theme/pixelTheme';
@@ -181,8 +181,7 @@ function TitleCard({ entry, onPress, onRemove }: TitleCardProps) {
       >
         <View style={[styles.slideIndicator, removing ? styles.slideOff : styles.slideOn]} />
         <Text style={styles.removeBtnText}>
-          {removing ? 'REMOVING' : 'REMOVE'}{'
-'}{removing ? '...' : '✕'}
+          {removing ? 'REMOVING' : 'REMOVE'}{'\n'}{removing ? '...' : '✕'}
         </Text>
       </TouchableOpacity>
     </View>

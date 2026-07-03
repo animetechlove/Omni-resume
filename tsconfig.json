@@ -3,13 +3,11 @@
     "strict": true,
     "ignoreDeprecations": "6.0",
     "target": "esnext",
-    "module": "commonjs",
     "lib": [
       "esnext"
     ],
     "jsx": "react-native",
     "noEmit": true,
-    "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
