@@ -23,8 +23,9 @@ import {
   getWatchHistory, getCompletionEvents,
 } from '../db/dao/TitleDAO';
 import {
-  getProgress, recordWatchProgress, setShelfStatus, startRewatch,
+  getOrCreateProgress, recordWatchProgress, setShelfStatus, startRewatch,
 } from '../db/dao/ProgressDAO';
+import { seedKnownArcs } from '../services/ArcService';
 
 type RouteParams = { title_id: string };
 
@@ -54,8 +55,9 @@ interface PlatformPickerProps {
 function PlatformPickerModal({
   visible, platforms, subscriptions, selectedId, onSelect, onCancel,
 }: PlatformPickerProps) {
+  const subscribedIds = new Set(subscriptions.map(s => s.platform_id));
   const available = platforms.filter(
-    p => p.platform_id !== 'omni_companion',
+    p => subscribedIds.has(p.platform_id) && p.platform_id !== 'omni_companion',
   );
 
   return (
@@ -210,7 +212,7 @@ export default function TrackerScreen() {
   const load = useCallback(async () => {
     const [t, p, s, a, eps, plats, subs, hist, comps] = await Promise.all([
       getTitleById(title_id),
-      getProgress(title_id),
+      getOrCreateProgress(title_id),
       getSeasonsForTitle(title_id),
       getArcsForTitle(title_id),
       getEpisodesForTitle(title_id),
@@ -219,11 +221,30 @@ export default function TrackerScreen() {
       getWatchHistory(title_id),
       getCompletionEvents(title_id),
     ]);
+
+    // No arc breakdown yet — try seeding a known one (e.g. Dragon Ball Z's
+    // sagas) before giving up and showing episodes as one flat list.
+    let arcs = a;
+    let episodesList = eps;
+    if (a.length === 0 && t?.anilist_id) {
+      try {
+        const seeded = await seedKnownArcs(title_id, t.anilist_id);
+        if (seeded) {
+          [arcs, episodesList] = await Promise.all([
+            getArcsForTitle(title_id),
+            getEpisodesForTitle(title_id),
+          ]);
+        }
+      } catch (e) {
+        console.error('[TrackerScreen] arc seeding failed', e);
+      }
+    }
+
     setTitle(t);
     setProgress(p);
     setSeasons(s);
-    setArcs(a);
-    setEpisodes(eps);
+    setArcs(arcs);
+    setEpisodes(episodesList);
     setPlatforms(plats);
     setSubscriptions(subs);
     setHistory(hist);

@@ -9,7 +9,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { execute, query } from '../db/database';
 import { upsertTitle, upsertSeason, upsertEpisode } from '../db/dao/TitleDAO';
-import { getOrCreateProgress } from '../db/dao/ProgressDAO';
 
 // ─── ANILIST RELATIONS QUERY ──────────────────────────────────────────────────
 
@@ -167,7 +166,11 @@ export async function buildFranchiseForTitle(titleId: string, anilistId: number)
             }
           }
 
-          await getOrCreateProgress(relatedTitleId);
+          // Deliberately no getOrCreateProgress() here — a title/season/
+          // episode row is enough for it to show up on the franchise map,
+          // but it should not silently join the user's library. Only the
+          // title they explicitly added (or later open the tracker for)
+          // should get a progress row.
         }
 
         visited.set(edge.node.id, {
