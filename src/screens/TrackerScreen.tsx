@@ -20,12 +20,13 @@ import type {
 import {
   getTitleById, getSeasonsForTitle, getArcsForTitle,
   getEpisodesForTitle, getUserSubscriptions, getAllPlatforms,
-  getWatchHistory, getCompletionEvents, backfillMissingEpisodes,
+  getWatchHistory, getCompletionEvents, backfillMissingEpisodes, upsertTitle,
 } from '../db/dao/TitleDAO';
 import {
   getOrCreateProgress, recordWatchProgress, setShelfStatus, startRewatch,
 } from '../db/dao/ProgressDAO';
 import { seedKnownArcs, assignEpisodesToArcs } from '../services/ArcService';
+import { fetchTitleMetadata } from '../services/AniListClient';
 
 type RouteParams = { title_id: string };
 
@@ -339,15 +340,42 @@ export default function TrackerScreen() {
 
     let arcs = a;
     let episodesList = eps;
+    let titleRow = t;
+
+    // Some titles ended up with no total_episodes ever saved (e.g. a
+    // failed/partial add before other fixes landed) — without that number
+    // nothing downstream (backfill, arc percentage, pagination) has
+    // anything to work from. Re-fetch it from AniList if we know the id.
+    if (titleRow && !titleRow.total_episodes && titleRow.anilist_id) {
+      try {
+        const meta = await fetchTitleMetadata(titleRow.anilist_id);
+        if (meta?.episodes) {
+          await upsertTitle({
+            title_id: titleRow.title_id,
+            anilist_id: titleRow.anilist_id,
+            mal_id: titleRow.mal_id,
+            romaji_title: titleRow.romaji_title,
+            english_title: titleRow.english_title,
+            media_format: meta.format ?? titleRow.media_format,
+            total_episodes: meta.episodes,
+            cover_image_url: titleRow.cover_image_url,
+            updated_at: Date.now(),
+          });
+          titleRow = await getTitleById(title_id);
+        }
+      } catch (e) {
+        console.error('[TrackerScreen] title metadata repair failed', e);
+      }
+    }
 
     // Fill in any episode rows missing between what's stored and the
     // title's real total_episodes — covers titles added before an
     // episode-stub cap was lifted, or ongoing shows that have aired more
     // since being added (e.g. One Piece).
     let backfilled = false;
-    if (t?.total_episodes && s.length > 0 && episodesList.length < t.total_episodes) {
+    if (titleRow?.total_episodes && s.length > 0 && episodesList.length < titleRow.total_episodes) {
       try {
-        backfilled = await backfillMissingEpisodes(title_id, s[0].season_id, t.total_episodes);
+        backfilled = await backfillMissingEpisodes(title_id, s[0].season_id, titleRow.total_episodes);
         if (backfilled) episodesList = await getEpisodesForTitle(title_id);
       } catch (e) {
         console.error('[TrackerScreen] episode backfill failed', e);
@@ -356,9 +384,9 @@ export default function TrackerScreen() {
 
     // No arc breakdown yet — try seeding a known one (e.g. Dragon Ball Z's
     // sagas) before giving up and showing episodes as one flat list.
-    if (arcs.length === 0 && t?.anilist_id) {
+    if (arcs.length === 0 && titleRow?.anilist_id) {
       try {
-        const seeded = await seedKnownArcs(title_id, t.anilist_id);
+        const seeded = await seedKnownArcs(title_id, titleRow.anilist_id);
         if (seeded) {
           [arcs, episodesList] = await Promise.all([
             getArcsForTitle(title_id),
@@ -379,7 +407,7 @@ export default function TrackerScreen() {
       }
     }
 
-    setTitle(t);
+    setTitle(titleRow);
     setProgress(p);
     setSeasons(s);
     setArcs(arcs);
