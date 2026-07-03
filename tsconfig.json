@@ -12,8 +12,7 @@
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "allowJs": true,
-    "baseUrl": "."
+    "allowJs": true
   },
   "include": [
     "src",
